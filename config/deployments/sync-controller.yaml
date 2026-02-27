@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sync-controller
+  namespace: git-system
+  labels:
+    app.kubernetes.io/name: git-k8s
+    app.kubernetes.io/component: sync-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: sync-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: git-k8s
+        app.kubernetes.io/component: sync-controller
+    spec:
+      serviceAccountName: git-k8s-controller
+      containers:
+        - name: controller
+          # ko will replace this with the actual registry image SHA.
+          image: ko://github.com/imjasonh/git-k8s/cmd/sync-controller
+          env:
+            - name: SYSTEM_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: CONFIG_LOGGING_NAME
+              value: config-logging
+            - name: CONFIG_OBSERVABILITY_NAME
+              value: config-observability
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL

@@ -1,0 +1,103 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: gitpushtransactions.git.k8s.io
+spec:
+  group: git.k8s.io
+  names:
+    kind: GitPushTransaction
+    listKind: GitPushTransactionList
+    plural: gitpushtransactions
+    singular: gitpushtransaction
+    shortNames:
+      - gitpush
+    categories:
+      - git
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - repositoryRef
+                - refSpecs
+              properties:
+                repositoryRef:
+                  type: string
+                  description: Name of the target GitRepository resource.
+                atomic:
+                  type: boolean
+                  description: Whether the push should be atomic.
+                  default: true
+                refSpecs:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required:
+                      - source
+                      - destination
+                    properties:
+                      source:
+                        type: string
+                        description: Local ref (commit SHA or branch name).
+                      destination:
+                        type: string
+                        description: Remote ref to update.
+                      expectedOldCommit:
+                        type: string
+                        description: Expected current commit SHA for CAS.
+            status:
+              type: object
+              properties:
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - InProgress
+                    - Succeeded
+                    - Failed
+                resultCommit:
+                  type: string
+                startTime:
+                  type: string
+                  format: date-time
+                completionTime:
+                  type: string
+                  format: date-time
+                message:
+                  type: string
+      additionalPrinterColumns:
+        - name: Repository
+          type: string
+          jsonPath: .spec.repositoryRef
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

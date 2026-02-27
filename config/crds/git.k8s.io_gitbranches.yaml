@@ -1,0 +1,77 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: gitbranches.git.k8s.io
+spec:
+  group: git.k8s.io
+  names:
+    kind: GitBranch
+    listKind: GitBranchList
+    plural: gitbranches
+    singular: gitbranch
+    shortNames:
+      - gitbr
+    categories:
+      - git
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - repositoryRef
+                - branchName
+              properties:
+                repositoryRef:
+                  type: string
+                  description: Name of the parent GitRepository resource.
+                branchName:
+                  type: string
+                  description: Name of the branch (e.g., "main", "feature/foo").
+            status:
+              type: object
+              properties:
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                headCommit:
+                  type: string
+                  description: SHA of the current HEAD commit.
+                lastUpdated:
+                  type: string
+                  format: date-time
+      additionalPrinterColumns:
+        - name: Repository
+          type: string
+          jsonPath: .spec.repositoryRef
+        - name: Branch
+          type: string
+          jsonPath: .spec.branchName
+        - name: HEAD
+          type: string
+          jsonPath: .status.headCommit
+          priority: 1
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

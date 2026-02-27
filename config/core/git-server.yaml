@@ -1,0 +1,113 @@
+## In-cluster Git server using Gitea.
+## Provides a lightweight Git hosting service that controllers push to and fetch from.
+## This is the backing store for all GitRepository resources.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: git-server-data
+  namespace: git-system
+  labels:
+    app.kubernetes.io/name: git-server
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: git-server
+  namespace: git-system
+  labels:
+    app.kubernetes.io/name: git-server
+    app.kubernetes.io/component: server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: git-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: git-server
+        app.kubernetes.io/component: server
+    spec:
+      containers:
+        - name: gitea
+          image: gitea/gitea:1.21-rootless
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+            - name: ssh
+              containerPort: 2222
+              protocol: TCP
+          env:
+            - name: GITEA__database__DB_TYPE
+              value: sqlite3
+            - name: GITEA__server__DISABLE_SSH
+              value: "false"
+            - name: GITEA__server__SSH_PORT
+              value: "2222"
+            - name: GITEA__server__START_SSH_SERVER
+              value: "true"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/gitea
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /api/v1/version
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/v1/version
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: git-server-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: git-server
+  namespace: git-system
+  labels:
+    app.kubernetes.io/name: git-server
+    app.kubernetes.io/component: server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: git-server
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+      protocol: TCP
+    - name: ssh
+      port: 2222
+      targetPort: ssh
+      protocol: TCP
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: git-system
+  labels:
+    app.kubernetes.io/name: git-k8s
+    app.kubernetes.io/part-of: git-k8s

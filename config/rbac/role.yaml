@@ -1,0 +1,101 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: git-k8s-controller
+  labels:
+    app.kubernetes.io/name: git-k8s
+rules:
+  # Full access to all git.k8s.io custom resources.
+  - apiGroups:
+      - git.k8s.io
+    resources:
+      - gitrepositories
+      - gitbranches
+      - gitpushtransactions
+      - gitreposyncs
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # Status subresource access.
+  - apiGroups:
+      - git.k8s.io
+    resources:
+      - gitrepositories/status
+      - gitbranches/status
+      - gitpushtransactions/status
+      - gitreposyncs/status
+    verbs:
+      - get
+      - update
+      - patch
+  # Read secrets for Git authentication.
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  # Events for controller status reporting.
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  # ConfigMaps for leader election and config.
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # Leases for leader election.
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: git-k8s-controller
+  labels:
+    app.kubernetes.io/name: git-k8s
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: git-k8s-controller
+subjects:
+  - kind: ServiceAccount
+    name: git-k8s-controller
+    namespace: git-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: git-k8s-controller
+  namespace: git-system
+  labels:
+    app.kubernetes.io/name: git-k8s

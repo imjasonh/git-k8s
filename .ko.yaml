@@ -1,0 +1,3 @@
+# ko configuration for git-k8s control plane.
+# See https://ko.build/configuration/ for details.
+defaultBaseImage: gcr.io/distroless/static:nonroot
