@@ -13,6 +13,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  workflows: write
 
 jobs:
   compile:
@@ -29,7 +30,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
-          # Use default GITHUB_TOKEN — needs contents: write permission
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install gh-aw extension
@@ -44,7 +44,7 @@ jobs:
 
       - name: Commit and push lock files if changed
         run: |
-          git add .github/workflows/*.lock.yml
+          git add .github/workflows/*.lock.yml || true
           if git diff --cached --quiet; then
             echo "Lock files are up to date."
           else
