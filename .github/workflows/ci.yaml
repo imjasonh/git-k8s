@@ -27,6 +27,9 @@ jobs:
           go build ./cmd/sync-controller/
           go build ./cmd/resolver-controller/
 
+      - name: Test
+        run: go test ./...
+
       - name: Vet
         run: go vet ./...
 
