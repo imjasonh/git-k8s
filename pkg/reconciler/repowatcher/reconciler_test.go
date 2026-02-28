@@ -87,6 +87,52 @@ func TestMockLsRemote(t *testing.T) {
 	}
 }
 
+func TestIsOwnedBy(t *testing.T) {
+	repo := &gitv1alpha1.GitRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "my-repo",
+			UID:  "repo-uid-123",
+		},
+	}
+
+	// Branch with matching owner reference.
+	ownedBranch := &gitv1alpha1.GitBranch{
+		ObjectMeta: metav1.ObjectMeta{
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: gitv1alpha1.SchemeGroupVersion.String(),
+					Kind:       "GitRepository",
+					Name:       "my-repo",
+					UID:        "repo-uid-123",
+				},
+			},
+		},
+	}
+	if !isOwnedBy(ownedBranch, repo) {
+		t.Error("isOwnedBy should return true for owned branch")
+	}
+
+	// Branch with no owner reference (manually created).
+	manualBranch := &gitv1alpha1.GitBranch{}
+	if isOwnedBy(manualBranch, repo) {
+		t.Error("isOwnedBy should return false for branch without owner reference")
+	}
+
+	// Branch owned by a different repo.
+	otherBranch := &gitv1alpha1.GitBranch{
+		ObjectMeta: metav1.ObjectMeta{
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					UID: "other-uid-456",
+				},
+			},
+		},
+	}
+	if isOwnedBy(otherBranch, repo) {
+		t.Error("isOwnedBy should return false for branch owned by different repo")
+	}
+}
+
 func TestRefFiltering(t *testing.T) {
 	// Simulate what the reconciler does: filter ls-remote output to branches only.
 	refs := []*plumbing.Reference{

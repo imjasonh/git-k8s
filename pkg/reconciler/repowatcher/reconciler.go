@@ -152,8 +152,15 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, repo *gitv1alpha1.GitRep
 	}
 
 	// Delete branches that no longer exist on the remote.
+	// Only delete branches that were created by this controller (identified
+	// by having an owner reference to the GitRepository). Branches created
+	// manually or by other controllers (e.g., push-controller) are left alone.
 	for branchName, existing := range existingByName {
 		if _, found := remoteBranches[branchName]; !found {
+			if !isOwnedBy(existing, repo) {
+				logger.Debugf("Skipping deletion of GitBranch %s/%s (not owned by repo %s)", namespace, existing.Name, repo.Name)
+				continue
+			}
 			if err := r.gitClient.GitBranches(namespace).Delete(ctx, existing.Name, metav1.DeleteOptions{}); err != nil {
 				if !apierrors.IsNotFound(err) {
 					return fmt.Errorf("deleting branch %s: %w", existing.Name, err)
@@ -244,6 +251,16 @@ func branchCRDName(repoName, branchName string) string {
 	// Replace slashes with dashes for K8s name compatibility.
 	safeBranch := strings.ReplaceAll(branchName, "/", "-")
 	return fmt.Sprintf("%s-%s", repoName, safeBranch)
+}
+
+// isOwnedBy returns true if the GitBranch has an owner reference pointing to the given GitRepository.
+func isOwnedBy(branch *gitv1alpha1.GitBranch, repo *gitv1alpha1.GitRepository) bool {
+	for _, ref := range branch.OwnerReferences {
+		if ref.UID == repo.UID {
+			return true
+		}
+	}
+	return false
 }
 
 func minLen(a, b int) int {
