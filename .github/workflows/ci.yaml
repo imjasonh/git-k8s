@@ -36,7 +36,6 @@ jobs:
   e2e:
     name: e2e
     runs-on: ubuntu-latest
-    needs: build
 
     env:
       KO_DOCKER_REPO: registry.local:5000/git-k8s
@@ -92,18 +91,220 @@ jobs:
           kubectl get crd gitpushtransactions.git-k8s.imjasonh.com
           kubectl get crd gitreposyncs.git-k8s.imjasonh.com
 
-      - name: Smoke test - create a GitRepository
+      - name: Deploy Gitea git server
         run: |
-          cat <<EOF | kubectl apply -f -
+          kubectl apply -f - <<'EOF'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: gitea
+            namespace: git-system
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: gitea
+            template:
+              metadata:
+                labels:
+                  app: gitea
+              spec:
+                containers:
+                - name: gitea
+                  image: gitea/gitea:1.21-rootless
+                  ports:
+                  - containerPort: 3000
+                    name: http
+                  env:
+                  - name: GITEA__database__DB_TYPE
+                    value: sqlite3
+                  - name: GITEA__security__INSTALL_LOCK
+                    value: "true"
+                  readinessProbe:
+                    httpGet:
+                      path: /api/v1/version
+                      port: 3000
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                  resources:
+                    requests:
+                      cpu: 100m
+                      memory: 256Mi
+                  volumeMounts:
+                  - name: data
+                    mountPath: /var/lib/gitea
+                  - name: config
+                    mountPath: /etc/gitea
+                volumes:
+                - name: data
+                  emptyDir: {}
+                - name: config
+                  emptyDir: {}
+          EOF
+          kubectl apply -f - <<'EOF'
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: gitea
+            namespace: git-system
+          spec:
+            selector:
+              app: gitea
+            ports:
+            - port: 3000
+              targetPort: 3000
+              name: http
+          EOF
+
+      - name: Wait for Gitea
+        run: |
+          kubectl rollout status deployment/gitea -n git-system --timeout=120s
+          # Wait for Gitea API to be fully responsive inside the pod.
+          for i in $(seq 1 30); do
+            if kubectl exec -n git-system deploy/gitea -- \
+              curl -sf http://localhost:3000/api/v1/version; then
+              echo ""
+              echo "Gitea API is ready"
+              break
+            fi
+            echo "Waiting for Gitea API (attempt $i)..."
+            sleep 2
+          done
+
+      - name: Create Gitea admin user
+        run: |
+          kubectl exec -n git-system deploy/gitea -- \
+            gitea admin user create \
+            --admin \
+            --username testadmin \
+            --password testpassword123 \
+            --email admin@test.local \
+            --must-change-password=false
+
+      - name: Create test repository
+        run: |
+          kubectl exec -n git-system deploy/gitea -- \
+            curl -sf -X POST http://localhost:3000/api/v1/user/repos \
+            -H 'Content-Type: application/json' \
+            -u testadmin:testpassword123 \
+            -d '{"name":"test-repo","auto_init":true,"default_branch":"main"}'
+          echo ""
+          echo "Test repository created"
+
+      - name: Create Git credentials Secret
+        run: |
+          kubectl create secret generic gitea-creds \
+            --namespace=default \
+            --from-literal=username=testadmin \
+            --from-literal=password=testpassword123
+
+      - name: Create GitRepository
+        run: |
+          cat <<'EOF' | kubectl apply -f -
           apiVersion: git-k8s.imjasonh.com/v1alpha1
           kind: GitRepository
           metadata:
             name: test-repo
             namespace: default
           spec:
-            url: https://github.com/example/test.git
+            url: http://gitea.git-system.svc.cluster.local:3000/testadmin/test-repo.git
+            defaultBranch: main
+            auth:
+              secretRef:
+                name: gitea-creds
           EOF
           kubectl get gitrepositories -A
+
+      - name: Create GitBranch
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: git-k8s.imjasonh.com/v1alpha1
+          kind: GitBranch
+          metadata:
+            name: test-repo-feature
+            namespace: default
+          spec:
+            repositoryRef: test-repo
+            branchName: feature-test
+          EOF
+          kubectl get gitbranches -A
+
+      - name: Push main to a new branch via GitPushTransaction
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: git-k8s.imjasonh.com/v1alpha1
+          kind: GitPushTransaction
+          metadata:
+            name: test-push
+            namespace: default
+          spec:
+            repositoryRef: test-repo
+            refSpecs:
+            - source: refs/heads/main
+              destination: refs/heads/feature-test
+          EOF
+          kubectl get gitpushtransactions -A
+
+      - name: Wait for push transaction to succeed
+        run: |
+          echo "Waiting for GitPushTransaction to complete..."
+          for i in $(seq 1 60); do
+            PHASE=$(kubectl get gitpushtransaction test-push -n default \
+              -o jsonpath='{.status.phase}' 2>/dev/null)
+            echo "  attempt ${i}: phase=${PHASE:-Pending}"
+            if [ "$PHASE" = "Succeeded" ]; then
+              echo "Push transaction succeeded!"
+              break
+            elif [ "$PHASE" = "Failed" ]; then
+              echo "Push transaction FAILED!"
+              kubectl get gitpushtransaction test-push -n default -o yaml
+              kubectl logs -n git-system deploy/push-controller --tail=100
+              exit 1
+            fi
+            sleep 2
+          done
+          PHASE=$(kubectl get gitpushtransaction test-push -n default \
+            -o jsonpath='{.status.phase}')
+          if [ "$PHASE" != "Succeeded" ]; then
+            echo "Timed out waiting for push transaction (phase: ${PHASE:-empty})"
+            kubectl logs -n git-system deploy/push-controller --tail=100
+            exit 1
+          fi
+
+      - name: Verify push transaction result
+        run: |
+          echo "=== GitPushTransaction status ==="
+          kubectl get gitpushtransaction test-push -n default -o yaml
+
+          COMMIT=$(kubectl get gitpushtransaction test-push -n default \
+            -o jsonpath='{.status.resultCommit}')
+          echo "Result commit: $COMMIT"
+          if [ -z "$COMMIT" ]; then
+            echo "FAIL: resultCommit is empty"
+            exit 1
+          fi
+
+      - name: Verify GitBranch was updated by controller
+        run: |
+          echo "=== GitBranch status ==="
+          kubectl get gitbranch test-repo-feature -n default -o yaml
+
+          COMMIT=$(kubectl get gitbranch test-repo-feature -n default \
+            -o jsonpath='{.status.headCommit}')
+          echo "GitBranch headCommit: $COMMIT"
+          if [ -z "$COMMIT" ]; then
+            echo "FAIL: GitBranch headCommit was not updated by the controller"
+            exit 1
+          fi
+
+      - name: Verify branch exists on git server
+        run: |
+          echo "Listing branches on Gitea..."
+          kubectl exec -n git-system deploy/gitea -- \
+            curl -sf http://localhost:3000/api/v1/repos/testadmin/test-repo/branches/feature-test \
+            -u testadmin:testpassword123
+          echo ""
+          echo "Branch feature-test verified on git server!"
 
       - name: Collect diagnostics
         if: ${{ failure() }}
@@ -111,4 +312,4 @@ jobs:
         with:
           artifact-name: kind-logs
           cluster-resources: nodes,namespaces,crds
-          namespace-resources: pods,deployments,services
+          namespace-resources: pods,deployments,services,gitrepositories,gitbranches,gitpushtransactions

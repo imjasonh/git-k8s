@@ -2,6 +2,7 @@ package push
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 
 	"github.com/go-git/go-git/v5"
@@ -160,9 +161,21 @@ func (r *Reconciler) resolveAuth(ctx context.Context, namespace string, repo *gi
 		return nil, fmt.Errorf("reading secret data: found=%v err=%v", found, err)
 	}
 
+	// Secret data values are base64-encoded in the API response when
+	// accessed via the dynamic client (unlike the typed client which
+	// decodes automatically into []byte fields).
+	username, err := base64.StdEncoding.DecodeString(data["username"])
+	if err != nil {
+		return nil, fmt.Errorf("decoding username: %w", err)
+	}
+	password, err := base64.StdEncoding.DecodeString(data["password"])
+	if err != nil {
+		return nil, fmt.Errorf("decoding password: %w", err)
+	}
+
 	return &http.BasicAuth{
-		Username: data["username"],
-		Password: data["password"],
+		Username: string(username),
+		Password: string(password),
 	}, nil
 }
 
