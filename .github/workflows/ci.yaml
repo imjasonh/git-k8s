@@ -84,13 +84,6 @@ jobs:
               --namespace=git-system --timeout=120s
           done
 
-      - name: Verify CRDs are installed
-        run: |
-          kubectl get crd gitrepositories.git-k8s.imjasonh.com
-          kubectl get crd gitbranches.git-k8s.imjasonh.com
-          kubectl get crd gitpushtransactions.git-k8s.imjasonh.com
-          kubectl get crd gitreposyncs.git-k8s.imjasonh.com
-
       - name: Deploy Gitea git server
         run: |
           kubectl apply -f - <<'EOF'
@@ -159,7 +152,6 @@ jobs:
       - name: Wait for Gitea
         run: |
           kubectl rollout status deployment/gitea -n git-system --timeout=120s
-          # Wait for Gitea API to be fully responsive inside the pod.
           for i in $(seq 1 30); do
             if kubectl exec -n git-system deploy/gitea -- \
               curl -sf http://localhost:3000/api/v1/version; then
@@ -181,256 +173,37 @@ jobs:
             --email admin@test.local \
             --must-change-password=false
 
-      - name: Create test repository
+      - name: Run e2e tests
         run: |
-          kubectl exec -n git-system deploy/gitea -- \
-            curl -sf -X POST http://localhost:3000/api/v1/user/repos \
-            -H 'Content-Type: application/json' \
-            -u testadmin:testpassword123 \
-            -d '{"name":"test-repo","auto_init":true,"default_branch":"main"}'
-          echo ""
-          echo "Test repository created"
-
-      - name: Create Git credentials Secret
-        run: |
-          kubectl create secret generic gitea-creds \
-            --namespace=default \
-            --from-literal=username=testadmin \
-            --from-literal=password=testpassword123
-
-      - name: Create GitRepository
-        run: |
-          cat <<'EOF' | kubectl apply -f -
-          apiVersion: git-k8s.imjasonh.com/v1alpha1
-          kind: GitRepository
-          metadata:
-            name: test-repo
-            namespace: default
-          spec:
-            url: http://gitea.git-system.svc.cluster.local:3000/testadmin/test-repo.git
-            defaultBranch: main
-            auth:
-              secretRef:
-                name: gitea-creds
-          EOF
-          kubectl get gitrepositories -A
-
-      - name: Create GitBranch
-        run: |
-          cat <<'EOF' | kubectl apply -f -
-          apiVersion: git-k8s.imjasonh.com/v1alpha1
-          kind: GitBranch
-          metadata:
-            name: test-repo-feature
-            namespace: default
-          spec:
-            repositoryRef: test-repo
-            branchName: feature-test
-          EOF
-          kubectl get gitbranches -A
-
-      - name: Push main to a new branch via GitPushTransaction
-        run: |
-          cat <<'EOF' | kubectl apply -f -
-          apiVersion: git-k8s.imjasonh.com/v1alpha1
-          kind: GitPushTransaction
-          metadata:
-            name: test-push
-            namespace: default
-          spec:
-            repositoryRef: test-repo
-            refSpecs:
-            - source: refs/heads/main
-              destination: refs/heads/feature-test
-          EOF
-          kubectl get gitpushtransactions -A
-
-      - name: Wait for push transaction to succeed
-        run: |
-          echo "Waiting for GitPushTransaction to complete..."
-          for i in $(seq 1 60); do
-            PHASE=$(kubectl get gitpushtransaction test-push -n default \
-              -o jsonpath='{.status.phase}' 2>/dev/null)
-            echo "  attempt ${i}: phase=${PHASE:-Pending}"
-            if [ "$PHASE" = "Succeeded" ]; then
-              echo "Push transaction succeeded!"
-              break
-            elif [ "$PHASE" = "Failed" ]; then
-              echo "Push transaction FAILED!"
-              kubectl get gitpushtransaction test-push -n default -o yaml
-              kubectl logs -n git-system deploy/push-controller --tail=100
-              exit 1
-            fi
-            sleep 2
-          done
-          PHASE=$(kubectl get gitpushtransaction test-push -n default \
-            -o jsonpath='{.status.phase}')
-          if [ "$PHASE" != "Succeeded" ]; then
-            echo "Timed out waiting for push transaction (phase: ${PHASE:-empty})"
-            kubectl logs -n git-system deploy/push-controller --tail=100
-            exit 1
-          fi
-
-      - name: Verify push transaction result
-        run: |
-          echo "=== GitPushTransaction status ==="
-          kubectl get gitpushtransaction test-push -n default -o yaml
-
-          COMMIT=$(kubectl get gitpushtransaction test-push -n default \
-            -o jsonpath='{.status.resultCommit}')
-          echo "Result commit: $COMMIT"
-          if [ -z "$COMMIT" ]; then
-            echo "FAIL: resultCommit is empty"
-            exit 1
-          fi
-
-      - name: Verify GitBranch was updated by controller
-        run: |
-          echo "=== GitBranch status ==="
-          kubectl get gitbranch test-repo-feature -n default -o yaml
-
-          COMMIT=$(kubectl get gitbranch test-repo-feature -n default \
-            -o jsonpath='{.status.headCommit}')
-          echo "GitBranch headCommit: $COMMIT"
-          if [ -z "$COMMIT" ]; then
-            echo "FAIL: GitBranch headCommit was not updated by the controller"
-            exit 1
-          fi
-
-      - name: Verify branch exists on git server
-        run: |
-          echo "Listing branches on Gitea..."
-          kubectl exec -n git-system deploy/gitea -- \
-            curl -sf http://localhost:3000/api/v1/repos/testadmin/test-repo/branches/feature-test \
-            -u testadmin:testpassword123
-          echo ""
-          echo "Branch feature-test verified on git server!"
-
-      # --- GitRepoSync e2e test ---
-      # Create a second repo on Gitea to test sync between two repos.
-      - name: Create second test repository on Gitea
-        run: |
-          kubectl exec -n git-system deploy/gitea -- \
-            curl -sf -X POST http://localhost:3000/api/v1/user/repos \
-            -H 'Content-Type: application/json' \
-            -u testadmin:testpassword123 \
-            -d '{"name":"test-repo-b","auto_init":true,"default_branch":"main"}'
-          echo ""
-          echo "Second test repository created"
-
-      - name: Create second GitRepository CR
-        run: |
-          cat <<'EOF' | kubectl apply -f -
-          apiVersion: git-k8s.imjasonh.com/v1alpha1
-          kind: GitRepository
-          metadata:
-            name: test-repo-b
-            namespace: default
-          spec:
-            url: http://gitea.git-system.svc.cluster.local:3000/testadmin/test-repo-b.git
-            defaultBranch: main
-            auth:
-              secretRef:
-                name: gitea-creds
-          EOF
-
-      - name: Create GitBranch CRs for sync test
-        run: |
-          # Get the head commit from each repo via Gitea API
-          COMMIT_A=$(kubectl exec -n git-system deploy/gitea -- \
-            curl -sf http://localhost:3000/api/v1/repos/testadmin/test-repo/branches/main \
-            -u testadmin:testpassword123 | python3 -c "import sys,json; print(json.load(sys.stdin)['commit']['id'])")
-          echo "Repo A main commit: $COMMIT_A"
-
-          COMMIT_B=$(kubectl exec -n git-system deploy/gitea -- \
-            curl -sf http://localhost:3000/api/v1/repos/testadmin/test-repo-b/branches/main \
-            -u testadmin:testpassword123 | python3 -c "import sys,json; print(json.load(sys.stdin)['commit']['id'])")
-          echo "Repo B main commit: $COMMIT_B"
-
-          # Create GitBranch CRs
-          cat <<'EOF' | kubectl apply -f -
-          apiVersion: git-k8s.imjasonh.com/v1alpha1
-          kind: GitBranch
-          metadata:
-            name: test-repo-main
-            namespace: default
-          spec:
-            repositoryRef: test-repo
-            branchName: main
-          EOF
-
-          cat <<'EOF' | kubectl apply -f -
-          apiVersion: git-k8s.imjasonh.com/v1alpha1
-          kind: GitBranch
-          metadata:
-            name: test-repo-b-main
-            namespace: default
-          spec:
-            repositoryRef: test-repo-b
-            branchName: main
-          EOF
-
-          # Set headCommit via status subresource patch
-          kubectl patch gitbranch test-repo-main -n default \
-            --type=merge --subresource=status \
-            -p "{\"status\":{\"headCommit\":\"${COMMIT_A}\"}}"
-
-          kubectl patch gitbranch test-repo-b-main -n default \
-            --type=merge --subresource=status \
-            -p "{\"status\":{\"headCommit\":\"${COMMIT_B}\"}}"
-
-          kubectl get gitbranches -A -o wide
-
-      - name: Create GitRepoSync
-        run: |
-          cat <<'EOF' | kubectl apply -f -
-          apiVersion: git-k8s.imjasonh.com/v1alpha1
-          kind: GitRepoSync
-          metadata:
-            name: test-sync
-            namespace: default
-          spec:
-            repoA:
-              name: test-repo
-            repoB:
-              name: test-repo-b
-            branchName: main
-          EOF
-          kubectl get gitreposyncs -A
-
-      - name: Wait for sync controller to process
-        run: |
-          echo "Waiting for GitRepoSync to be processed..."
-          for i in $(seq 1 30); do
-            PHASE=$(kubectl get gitreposync test-sync -n default \
-              -o jsonpath='{.status.phase}' 2>/dev/null)
-            MSG=$(kubectl get gitreposync test-sync -n default \
-              -o jsonpath='{.status.message}' 2>/dev/null)
-            echo "  attempt ${i}: phase=${PHASE:-empty} message=${MSG:-empty}"
-            if [ -n "$PHASE" ]; then
-              echo "Sync controller has set phase: $PHASE"
+          # Port-forward Gitea so Go tests can reach it from the runner.
+          kubectl port-forward -n git-system svc/gitea 3000:3000 &
+          PF_PID=$!
+          # Wait for port-forward to be ready.
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:3000/api/v1/version > /dev/null 2>&1; then
               break
             fi
-            sleep 2
+            sleep 1
           done
 
-      - name: Verify GitRepoSync status
-        run: |
-          echo "=== GitRepoSync status ==="
-          kubectl get gitreposync test-sync -n default -o yaml
+          GITEA_URL=http://localhost:3000 \
+          GITEA_INTERNAL_URL=http://gitea.git-system.svc.cluster.local:3000 \
+            go test -v -count=1 -timeout=10m -tags=e2e ./test/e2e/
 
-          PHASE=$(kubectl get gitreposync test-sync -n default \
-            -o jsonpath='{.status.phase}')
-          echo "Phase: $PHASE"
-          # The sync controller should have processed this - phase should be set
-          if [ -z "$PHASE" ]; then
-            echo "FAIL: sync controller did not set a phase"
-            kubectl logs -n git-system deploy/sync-controller --tail=100
-            exit 1
-          fi
-          echo "GitRepoSync e2e test passed! Phase: $PHASE"
+          kill $PF_PID 2>/dev/null || true
 
       - name: Collect diagnostics
+        if: ${{ failure() }}
+        run: |
+          echo "=== Controller logs ==="
+          for ctrl in push-controller sync-controller resolver-controller; do
+            echo "--- ${ctrl} ---"
+            kubectl logs -n git-system deploy/${ctrl} --tail=50 2>/dev/null || true
+          done
+          echo "=== CRD resources ==="
+          kubectl get gitrepositories,gitbranches,gitpushtransactions,gitreposyncs -A -o yaml 2>/dev/null || true
+
+      - name: Collect KinD diagnostics
         if: ${{ failure() }}
         uses: chainguard-dev/actions/kind-diag@main
         with:
