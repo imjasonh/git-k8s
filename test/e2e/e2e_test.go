@@ -227,6 +227,7 @@ func waitForPushTransaction(t *testing.T, name string) *gitv1alpha1.GitPushTrans
 	ctx := context.Background()
 	deadline := time.Now().Add(pollTimeout)
 
+	var lastTxn *gitv1alpha1.GitPushTransaction
 	for time.Now().Before(deadline) {
 		txn, err := gitClient.GitPushTransactions(testNamespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
@@ -234,6 +235,7 @@ func waitForPushTransaction(t *testing.T, name string) *gitv1alpha1.GitPushTrans
 			time.Sleep(pollInterval)
 			continue
 		}
+		lastTxn = txn
 		t.Logf("GitPushTransaction %q phase: %s", name, txn.Status.Phase)
 		switch txn.Status.Phase {
 		case gitv1alpha1.TransactionPhaseSucceeded:
@@ -242,6 +244,9 @@ func waitForPushTransaction(t *testing.T, name string) *gitv1alpha1.GitPushTrans
 			t.Fatalf("GitPushTransaction %q failed: %s", name, txn.Status.Message)
 		}
 		time.Sleep(pollInterval)
+	}
+	if lastTxn != nil {
+		t.Logf("Last seen state: phase=%q message=%q resourceVersion=%s", lastTxn.Status.Phase, lastTxn.Status.Message, lastTxn.ResourceVersion)
 	}
 	t.Fatalf("timed out waiting for GitPushTransaction %q", name)
 	return nil

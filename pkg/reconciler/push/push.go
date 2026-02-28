@@ -48,11 +48,13 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, key string) reconciler.E
 		return nil
 	}
 
-	// Mark as in-progress.
+	// Mark as in-progress. Capture the returned object to get the
+	// updated resourceVersion for subsequent status updates.
 	now := metav1.Now()
 	txn.Status.Phase = gitv1alpha1.TransactionPhaseInProgress
 	txn.Status.StartTime = &now
-	if _, err := r.gitClient.GitPushTransactions(namespace).UpdateStatus(ctx, txn, metav1.UpdateOptions{}); err != nil {
+	txn, err = r.gitClient.GitPushTransactions(namespace).UpdateStatus(ctx, txn, metav1.UpdateOptions{})
+	if err != nil {
 		return fmt.Errorf("updating status to InProgress: %w", err)
 	}
 
