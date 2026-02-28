@@ -221,6 +221,173 @@ func createGitBranch(t *testing.T, name, repoRef, branchName string) *gitv1alpha
 	return created
 }
 
+// createGiteaBranch creates a new branch on Gitea from an existing branch.
+func createGiteaBranch(t *testing.T, repo, newBranch, fromBranch string) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]interface{}{
+		"new_branch_name": newBranch,
+		"old_branch_name": fromBranch,
+	})
+	url := fmt.Sprintf("%s/api/v1/repos/%s/%s/branches", giteaURL, giteaUsername, repo)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("creating request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBasicAuth(giteaUsername, giteaPassword)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("creating Gitea branch %q: %v", newBranch, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("creating Gitea branch %q: status %d", newBranch, resp.StatusCode)
+	}
+	t.Logf("Created Gitea branch %q on repo %q", newBranch, repo)
+}
+
+// deleteGiteaBranch deletes a branch on Gitea.
+func deleteGiteaBranch(t *testing.T, repo, branch string) {
+	t.Helper()
+	url := fmt.Sprintf("%s/api/v1/repos/%s/%s/branches/%s", giteaURL, giteaUsername, repo, branch)
+	req, _ := http.NewRequest("DELETE", url, nil)
+	req.SetBasicAuth(giteaUsername, giteaPassword)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("deleting Gitea branch %q: %v", branch, err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		t.Fatalf("deleting Gitea branch %q: status %d", branch, resp.StatusCode)
+	}
+	t.Logf("Deleted Gitea branch %q on repo %q", branch, repo)
+}
+
+// createGiteaFile creates a file on Gitea, producing a new commit on the given branch.
+// Returns the new commit SHA.
+func createGiteaFile(t *testing.T, repo, branch, filePath, content string) string {
+	t.Helper()
+	body, _ := json.Marshal(map[string]interface{}{
+		"content":     content,
+		"branch":      branch,
+		"new_branch":  branch,
+		"message":     fmt.Sprintf("add %s", filePath),
+	})
+	url := fmt.Sprintf("%s/api/v1/repos/%s/%s/contents/%s", giteaURL, giteaUsername, repo, filePath)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("creating request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBasicAuth(giteaUsername, giteaPassword)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("creating file %q: %v", filePath, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("creating file %q: status %d", filePath, resp.StatusCode)
+	}
+
+	var result struct {
+		Commit struct {
+			SHA string `json:"sha"`
+		} `json:"commit"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decoding create file response: %v", err)
+	}
+	t.Logf("Created file %q on %s/%s, commit: %s", filePath, repo, branch, result.Commit.SHA)
+	return result.Commit.SHA
+}
+
+// createGitRepositoryWithPollInterval creates a GitRepository CR with a custom poll interval.
+func createGitRepositoryWithPollInterval(t *testing.T, name, repoName, secretName string, interval metav1.Duration) *gitv1alpha1.GitRepository {
+	t.Helper()
+	ctx := context.Background()
+	repo := &gitv1alpha1.GitRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: testNamespace,
+		},
+		Spec: gitv1alpha1.GitRepositorySpec{
+			URL:           fmt.Sprintf("%s/%s/%s.git", giteaInURL, giteaUsername, repoName),
+			DefaultBranch: "main",
+			Auth: &gitv1alpha1.GitAuth{
+				SecretRef: &gitv1alpha1.SecretRef{Name: secretName},
+			},
+			PollInterval: &interval,
+		},
+	}
+	created, err := gitClient.GitRepositories(testNamespace).Create(ctx, repo, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("creating GitRepository %q: %v", name, err)
+	}
+	t.Cleanup(func() {
+		gitClient.GitRepositories(testNamespace).Delete(ctx, name, metav1.DeleteOptions{})
+	})
+	return created
+}
+
+// waitForGitBranchExists polls until a GitBranch with the given name exists.
+func waitForGitBranchExists(t *testing.T, name string) *gitv1alpha1.GitBranch {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(pollTimeout)
+
+	for time.Now().Before(deadline) {
+		branch, err := gitClient.GitBranches(testNamespace).Get(ctx, name, metav1.GetOptions{})
+		if err == nil {
+			return branch
+		}
+		time.Sleep(pollInterval)
+	}
+	t.Fatalf("timed out waiting for GitBranch %q to exist", name)
+	return nil
+}
+
+// waitForGitBranchDeleted polls until a GitBranch with the given name no longer exists.
+func waitForGitBranchDeleted(t *testing.T, name string) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(pollTimeout)
+
+	for time.Now().Before(deadline) {
+		_, err := gitClient.GitBranches(testNamespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			t.Logf("GitBranch %q deleted", name)
+			return
+		}
+		time.Sleep(pollInterval)
+	}
+	t.Fatalf("timed out waiting for GitBranch %q to be deleted", name)
+}
+
+// waitForGitBranchHeadCommit polls until the GitBranch has the expected headCommit.
+func waitForGitBranchHeadCommit(t *testing.T, name, expectedCommit string) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(pollTimeout)
+
+	for time.Now().Before(deadline) {
+		branch, err := gitClient.GitBranches(testNamespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			time.Sleep(pollInterval)
+			continue
+		}
+		if branch.Status.HeadCommit == expectedCommit {
+			t.Logf("GitBranch %q headCommit matches: %s", name, expectedCommit)
+			return
+		}
+		t.Logf("GitBranch %q headCommit = %q, waiting for %q", name, branch.Status.HeadCommit, expectedCommit)
+		time.Sleep(pollInterval)
+	}
+	t.Fatalf("timed out waiting for GitBranch %q to have headCommit %q", name, expectedCommit)
+}
+
 // waitForPushTransaction polls until the GitPushTransaction reaches a terminal phase.
 func waitForPushTransaction(t *testing.T, name string) *gitv1alpha1.GitPushTransaction {
 	t.Helper()
