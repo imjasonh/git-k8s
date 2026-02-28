@@ -1,0 +1,100 @@
+name: Auto-merge automation PRs
+
+on:
+  # Trigger when CI checks complete on PRs
+  pull_request:
+    types: [opened, synchronize, labeled]
+  # Also trigger when check suites complete
+  check_suite:
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: Auto-merge
+    runs-on: ubuntu-latest
+    # Only run for PRs created by agentic workflows (labeled "automation")
+    if: >-
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'automation')) ||
+      github.event_name == 'check_suite'
+
+    steps:
+      - name: Enable auto-merge for automation PRs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Find the PR number depending on the trigger event
+            let prNumber;
+            if (context.eventName === 'pull_request') {
+              prNumber = context.payload.pull_request.number;
+            } else if (context.eventName === 'check_suite') {
+              // Find PRs associated with this check suite
+              const prs = context.payload.check_suite.pull_requests;
+              if (!prs || prs.length === 0) {
+                console.log('No PRs associated with this check suite');
+                return;
+              }
+              prNumber = prs[0].number;
+            }
+
+            if (!prNumber) {
+              console.log('No PR number found');
+              return;
+            }
+
+            // Get the PR details
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            // Only auto-merge PRs with the "automation" label
+            const hasAutomationLabel = pr.labels.some(l => l.name === 'automation');
+            if (!hasAutomationLabel) {
+              console.log(`PR #${prNumber} does not have the "automation" label, skipping`);
+              return;
+            }
+
+            // Check if all CI checks have passed
+            const { data: checks } = await github.rest.checks.listForRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: pr.head.sha,
+            });
+
+            const pending = checks.check_runs.filter(c =>
+              c.name !== 'Auto-merge' && c.status !== 'completed'
+            );
+            const failed = checks.check_runs.filter(c =>
+              c.name !== 'Auto-merge' && c.status === 'completed' && c.conclusion !== 'success' && c.conclusion !== 'skipped'
+            );
+
+            if (pending.length > 0) {
+              console.log(`PR #${prNumber} has ${pending.length} pending checks, will retry when they complete`);
+              return;
+            }
+
+            if (failed.length > 0) {
+              console.log(`PR #${prNumber} has ${failed.length} failed checks, not merging:`);
+              failed.forEach(c => console.log(`  - ${c.name}: ${c.conclusion}`));
+              return;
+            }
+
+            // All checks passed — merge the PR
+            console.log(`All checks passed for PR #${prNumber}, merging...`);
+            try {
+              await github.rest.pulls.merge({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                merge_method: 'merge',
+              });
+              console.log(`PR #${prNumber} merged successfully`);
+            } catch (error) {
+              console.log(`Failed to merge PR #${prNumber}: ${error.message}`);
+            }
