@@ -35,7 +35,6 @@ func NewController(ctx context.Context, cmw configmap.Watcher) *controller.Impl 
 	}
 
 	gitClient := gitclient.NewFromDynamic(dynClient)
-	ctx = gitclient.WithClient(ctx, gitClient)
 
 	// Create dynamic informer for GitPushTransaction.
 	factory := dynamicinformer.NewDynamicSharedInformerFactory(dynClient, 30*time.Second)

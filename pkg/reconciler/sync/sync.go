@@ -3,9 +3,11 @@ package sync
 import (
 	"context"
 	"fmt"
+
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/storage/memory"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
@@ -14,6 +16,7 @@ import (
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
+	"github.com/imjasonh/git-k8s/pkg/reconciler/internal"
 )
 
 // Reconciler implements the reconcile logic for GitRepoSync.
@@ -26,13 +29,14 @@ type Reconciler struct {
 func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 	logger := logging.FromContext(ctx)
 
-	namespace, name, err := splitKey(key)
-	if err != nil {
-		return err
-	}
+	namespace, name := internal.SplitKey(key)
 
 	// Fetch the GitRepoSync resource.
 	syncObj, err := r.gitClient.GitRepoSyncs(namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		logger.Debugf("GitRepoSync %s/%s no longer exists", namespace, name)
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("getting GitRepoSync %s/%s: %w", namespace, name, err)
 	}
@@ -208,15 +212,6 @@ func (r *Reconciler) updateSyncStatus(ctx context.Context, syncObj *gitv1alpha1.
 	return err
 }
 
-func splitKey(key string) (string, string, error) {
-	for i := range key {
-		if key[i] == '/' {
-			return key[:i], key[i+1:], nil
-		}
-	}
-	return "", key, nil
-}
-
 // Ensure Reconciler implements the reconciler interface.
 var _ reconciler.LeaderAware = (*Reconciler)(nil)
 
@@ -226,4 +221,3 @@ func (r *Reconciler) Promote(bkt reconciler.Bucket, enq func(reconciler.Bucket, 
 
 func (r *Reconciler) Demote(bkt reconciler.Bucket) {
 }
-

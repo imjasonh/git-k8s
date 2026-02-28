@@ -11,14 +11,17 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage/memory"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/dynamic"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/reconciler"
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
+	"github.com/imjasonh/git-k8s/pkg/reconciler/internal"
 )
 
 // Reconciler implements the reconcile logic for GitPushTransaction.
@@ -31,13 +34,14 @@ type Reconciler struct {
 func (r *Reconciler) ReconcileKind(ctx context.Context, key string) reconciler.Event {
 	logger := logging.FromContext(ctx)
 
-	namespace, name, err := splitKey(key)
-	if err != nil {
-		return err
-	}
+	namespace, name := internal.SplitKey(key)
 
 	// Fetch the GitPushTransaction.
 	txn, err := r.gitClient.GitPushTransactions(namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		logger.Debugf("GitPushTransaction %s/%s no longer exists", namespace, name)
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("getting GitPushTransaction %s/%s: %w", namespace, name, err)
 	}
@@ -158,7 +162,7 @@ func (r *Reconciler) resolveAuth(ctx context.Context, namespace string, repo *gi
 		return nil, fmt.Errorf("getting secret %q: %w", repo.Spec.Auth.SecretRef.Name, err)
 	}
 
-	data, found, err := unstructuredNestedStringMap(u.Object, "data")
+	data, found, err := unstructured.NestedStringMap(u.Object, "data")
 	if err != nil || !found {
 		return nil, fmt.Errorf("reading secret data: found=%v err=%v", found, err)
 	}
@@ -181,42 +185,6 @@ func (r *Reconciler) resolveAuth(ctx context.Context, namespace string, repo *gi
 	}, nil
 }
 
-// unstructuredNestedStringMap extracts a map[string]string from an unstructured object path.
-func unstructuredNestedStringMap(obj map[string]interface{}, fields ...string) (map[string]string, bool, error) {
-	val, found, err := nestedFieldNoCopy(obj, fields...)
-	if !found || err != nil {
-		return nil, found, err
-	}
-	m, ok := val.(map[string]interface{})
-	if !ok {
-		return nil, false, fmt.Errorf("expected map, got %T", val)
-	}
-	result := make(map[string]string, len(m))
-	for k, v := range m {
-		s, ok := v.(string)
-		if !ok {
-			continue
-		}
-		result[k] = s
-	}
-	return result, true, nil
-}
-
-func nestedFieldNoCopy(obj map[string]interface{}, fields ...string) (interface{}, bool, error) {
-	var val interface{} = obj
-	for _, field := range fields {
-		m, ok := val.(map[string]interface{})
-		if !ok {
-			return nil, false, nil
-		}
-		val, ok = m[field]
-		if !ok {
-			return nil, false, nil
-		}
-	}
-	return val, true, nil
-}
-
 // failTransaction marks a GitPushTransaction as Failed with the given message.
 func (r *Reconciler) failTransaction(ctx context.Context, txn *gitv1alpha1.GitPushTransaction, message string) error {
 	logger := logging.FromContext(ctx)
@@ -234,13 +202,14 @@ func (r *Reconciler) failTransaction(ctx context.Context, txn *gitv1alpha1.GitPu
 
 // updateBranches updates GitBranch CRs after a successful push.
 func (r *Reconciler) updateBranches(ctx context.Context, namespace string, txn *gitv1alpha1.GitPushTransaction) error {
+	// List branches once rather than per-refspec.
+	branches, err := r.gitClient.GitBranches(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("listing branches: %w", err)
+	}
+
 	now := metav1.Now()
 	for _, rs := range txn.Spec.RefSpecs {
-		// List branches matching the destination ref.
-		branches, err := r.gitClient.GitBranches(namespace).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return fmt.Errorf("listing branches: %w", err)
-		}
 		for i := range branches.Items {
 			branch := &branches.Items[i]
 			destRef := fmt.Sprintf("refs/heads/%s", branch.Spec.BranchName)
@@ -254,16 +223,6 @@ func (r *Reconciler) updateBranches(ctx context.Context, namespace string, txn *
 		}
 	}
 	return nil
-}
-
-// splitKey splits a namespace/name key.
-func splitKey(key string) (string, string, error) {
-	for i := range key {
-		if key[i] == '/' {
-			return key[:i], key[i+1:], nil
-		}
-	}
-	return "", key, nil
 }
 
 // Ensure Reconciler implements the reconciler interface.

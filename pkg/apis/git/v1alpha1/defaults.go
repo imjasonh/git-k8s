@@ -16,13 +16,7 @@ func SetDefaults_GitPushTransaction(t *GitPushTransaction) {
 	}
 }
 
-func addDefaultingFuncs(scheme *runtime.Scheme) error {
-	return RegisterDefaults(scheme)
-}
-
 // RegisterDefaults adds default functions to the given scheme.
-// This is a placeholder that will be populated by code generation.
-// For now we register defaults manually.
 func RegisterDefaults(scheme *runtime.Scheme) error {
 	scheme.AddTypeDefaultingFunc(&GitRepository{}, func(obj interface{}) {
 		SetDefaults_GitRepository(obj.(*GitRepository))
