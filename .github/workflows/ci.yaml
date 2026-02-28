@@ -36,7 +36,6 @@ jobs:
   e2e:
     name: e2e
     runs-on: ubuntu-latest
-    needs: build
 
     env:
       KO_DOCKER_REPO: registry.local:5000/git-k8s
