@@ -2,6 +2,8 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: gitreposyncs.git.k8s.io
+  annotations:
+    api-approved.kubernetes.io: "https://github.com/imjasonh/git-k8s"
 spec:
   group: git.k8s.io
   names:
