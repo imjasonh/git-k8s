@@ -5,9 +5,9 @@ metadata:
   labels:
     app.kubernetes.io/name: git-k8s
 rules:
-  # Full access to all git.k8s.io custom resources.
+  # Full access to all git-k8s.imjasonh.com custom resources.
   - apiGroups:
-      - git.k8s.io
+      - git-k8s.imjasonh.com
     resources:
       - gitrepositories
       - gitbranches
@@ -23,7 +23,7 @@ rules:
       - delete
   # Status subresource access.
   - apiGroups:
-      - git.k8s.io
+      - git-k8s.imjasonh.com
     resources:
       - gitrepositories/status
       - gitbranches/status

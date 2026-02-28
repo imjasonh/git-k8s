@@ -7,6 +7,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/storage/memory"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/reconciler"
@@ -161,8 +162,8 @@ func (r *Reconciler) createPushTransaction(ctx context.Context, namespace string
 			GenerateName: fmt.Sprintf("%s-sync-", syncObj.Name),
 			Namespace:    namespace,
 			Labels: map[string]string{
-				"git.k8s.io/repo-sync": syncObj.Name,
-				"git.k8s.io/target":    targetRepo,
+				"git-k8s.imjasonh.com/repo-sync": syncObj.Name,
+				"git-k8s.imjasonh.com/target":    targetRepo,
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
@@ -219,7 +220,7 @@ func splitKey(key string) (string, string, error) {
 // Ensure Reconciler implements the reconciler interface.
 var _ reconciler.LeaderAware = (*Reconciler)(nil)
 
-func (r *Reconciler) Promote(bkt reconciler.Bucket, enq func(bkt reconciler.Bucket, key string) error) error {
+func (r *Reconciler) Promote(bkt reconciler.Bucket, enq func(reconciler.Bucket, types.NamespacedName)) error {
 	return nil
 }
 

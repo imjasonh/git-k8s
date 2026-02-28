@@ -10,6 +10,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/reconciler"
@@ -170,12 +171,12 @@ func (r *Reconciler) attemptMerge(ctx context.Context, repoURL, commitAHash, com
 	mergeCommit := &object.Commit{
 		Author: object.Signature{
 			Name:  "git-k8s-resolver",
-			Email: "resolver@git.k8s.io",
+			Email: "resolver@git-k8s.imjasonh.com",
 			When:  time.Now(),
 		},
 		Committer: object.Signature{
 			Name:  "git-k8s-resolver",
-			Email: "resolver@git.k8s.io",
+			Email: "resolver@git-k8s.imjasonh.com",
 			When:  time.Now(),
 		},
 		Message:  fmt.Sprintf("Merge %s and %s\n\nAutomated merge by git-k8s conflict resolver.", commitAHash[:8], commitBHash[:8]),
@@ -215,9 +216,9 @@ func (r *Reconciler) createMergePushTransactions(ctx context.Context, namespace 
 			GenerateName: fmt.Sprintf("%s-merge-a-", syncObj.Name),
 			Namespace:    namespace,
 			Labels: map[string]string{
-				"git.k8s.io/repo-sync": syncObj.Name,
-				"git.k8s.io/target":    syncObj.Spec.RepoA.Name,
-				"git.k8s.io/merge":     "true",
+				"git-k8s.imjasonh.com/repo-sync": syncObj.Name,
+				"git-k8s.imjasonh.com/target":    syncObj.Spec.RepoA.Name,
+				"git-k8s.imjasonh.com/merge":     "true",
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
@@ -247,9 +248,9 @@ func (r *Reconciler) createMergePushTransactions(ctx context.Context, namespace 
 			GenerateName: fmt.Sprintf("%s-merge-b-", syncObj.Name),
 			Namespace:    namespace,
 			Labels: map[string]string{
-				"git.k8s.io/repo-sync": syncObj.Name,
-				"git.k8s.io/target":    syncObj.Spec.RepoB.Name,
-				"git.k8s.io/merge":     "true",
+				"git-k8s.imjasonh.com/repo-sync": syncObj.Name,
+				"git-k8s.imjasonh.com/target":    syncObj.Spec.RepoB.Name,
+				"git-k8s.imjasonh.com/merge":     "true",
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
@@ -303,7 +304,7 @@ func splitKey(key string) (string, string, error) {
 
 var _ reconciler.LeaderAware = (*Reconciler)(nil)
 
-func (r *Reconciler) Promote(bkt reconciler.Bucket, enq func(bkt reconciler.Bucket, key string) error) error {
+func (r *Reconciler) Promote(bkt reconciler.Bucket, enq func(reconciler.Bucket, types.NamespacedName)) error {
 	return nil
 }
 

@@ -1,4 +1,4 @@
-// Package client provides a typed Kubernetes client for the git.k8s.io API group.
+// Package client provides a typed Kubernetes client for the git-k8s.imjasonh.com API group.
 //
 // In a full Knative injection setup, this package would be auto-generated and
 // clients would be retrieved from context via injection (e.g., gitclient.Get(ctx)).
@@ -20,7 +20,7 @@ import (
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 )
 
-// GitV1alpha1Client provides typed access to git.k8s.io/v1alpha1 resources.
+// GitV1alpha1Client provides typed access to git-k8s.imjasonh.com/v1alpha1 resources.
 type GitV1alpha1Client struct {
 	client dynamic.Interface
 }

@@ -8,7 +8,7 @@ import (
 
 const (
 	// GroupName is the name of the API group.
-	GroupName = "git.k8s.io"
+	GroupName = "git-k8s.imjasonh.com"
 
 	// Version is the version of the API group.
 	Version = "v1alpha1"
