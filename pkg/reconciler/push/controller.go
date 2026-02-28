@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
@@ -15,6 +16,7 @@ import (
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
+	"github.com/imjasonh/git-k8s/pkg/reconciler/internal"
 )
 
 var pushTransactionGVR = schema.GroupVersionResource{
@@ -45,7 +47,12 @@ func NewController(ctx context.Context, cmw configmap.Watcher) *controller.Impl 
 		gitClient:     gitClient,
 	}
 
-	impl := controller.NewContext(ctx, r, controller.ControllerOptions{
+	impl := controller.NewContext(ctx, internal.NewReconciler(
+		func(ctx context.Context, namespace, name string) (*gitv1alpha1.GitPushTransaction, error) {
+			return gitClient.GitPushTransactions(namespace).Get(ctx, name, metav1.GetOptions{})
+		},
+		r,
+	), controller.ControllerOptions{
 		WorkQueueName: "GitPushTransactions",
 		Logger:        logger,
 	})
@@ -67,4 +74,3 @@ func NewController(ctx context.Context, cmw configmap.Watcher) *controller.Impl 
 
 	return impl
 }
-
