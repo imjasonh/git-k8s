@@ -153,11 +153,22 @@ jobs:
           EOF
 
       - name: Wait for Gitea
-        run: kubectl rollout status deployment/gitea -n git-system --timeout=120s
-
-      - name: Initialize Gitea
         run: |
-          # Create admin user.
+          kubectl rollout status deployment/gitea -n git-system --timeout=120s
+          # Wait for Gitea API to be fully responsive inside the pod.
+          for i in $(seq 1 30); do
+            if kubectl exec -n git-system deploy/gitea -- \
+              curl -sf http://localhost:3000/api/v1/version; then
+              echo ""
+              echo "Gitea API is ready"
+              break
+            fi
+            echo "Waiting for Gitea API (attempt $i)..."
+            sleep 2
+          done
+
+      - name: Create Gitea admin user
+        run: |
           kubectl exec -n git-system deploy/gitea -- \
             gitea admin user create \
             --admin \
@@ -166,7 +177,8 @@ jobs:
             --email admin@test.local \
             --must-change-password=false
 
-          # Create test repository with an initial commit on main.
+      - name: Create test repository
+        run: |
           kubectl exec -n git-system deploy/gitea -- \
             curl -sf -X POST http://localhost:3000/api/v1/user/repos \
             -H 'Content-Type: application/json' \
