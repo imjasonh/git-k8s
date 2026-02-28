@@ -92,7 +92,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 pull_number: prNumber,
-                merge_method: 'squash',
+                merge_method: 'merge',
               });
               console.log(`PR #${prNumber} merged successfully`);
             } catch (error) {
