@@ -56,11 +56,6 @@ jobs:
         with:
           k8s-version: 1.33.x
 
-      - name: Setup Knative
-        uses: chainguard-dev/actions/setup-knative@main
-        with:
-          version: "1.15.0"
-
       - name: Install ko
         uses: ko-build/setup-ko@v0.9
 
@@ -70,24 +65,20 @@ jobs:
       - name: Install CRDs
         run: kubectl apply -f config/crds/
 
-      - name: Deploy RBAC
+      - name: Deploy RBAC and controller config
         run: |
           kubectl create namespace git-system || true
           kubectl apply -f config/rbac/
+          # Create ConfigMaps required by knative.dev/pkg controller runtime.
+          kubectl create configmap config-logging -n git-system || true
+          kubectl create configmap config-observability -n git-system || true
 
-      - name: Deploy controllers with ko
-        run: ko apply -f config/deployments/
-
-      - name: Wait for controllers to be ready
+      - name: Deploy controllers and Gitea
         run: |
-          for deploy in push-controller sync-controller resolver-controller; do
-            echo "Waiting for ${deploy}..."
-            kubectl rollout status deployment/${deploy} \
-              --namespace=git-system --timeout=120s
-          done
+          # Deploy controllers and Gitea in parallel.
+          ko apply -f config/deployments/ &
+          KO_PID=$!
 
-      - name: Deploy Gitea git server
-        run: |
           kubectl apply -f - <<'EOF'
           apiVersion: apps/v1
           kind: Deployment
@@ -119,8 +110,8 @@ jobs:
                     httpGet:
                       path: /api/v1/version
                       port: 3000
-                    initialDelaySeconds: 10
-                    periodSeconds: 5
+                    initialDelaySeconds: 3
+                    periodSeconds: 3
                   resources:
                     requests:
                       cpu: 100m
@@ -151,10 +142,19 @@ jobs:
               name: http
           EOF
 
-      - name: Wait for Gitea
+          # Wait for ko build to finish.
+          wait $KO_PID
+
+      - name: Wait for controllers and Gitea
         run: |
-          kubectl rollout status deployment/gitea -n git-system --timeout=120s
-          for i in $(seq 1 30); do
+          # Wait for everything in parallel.
+          for deploy in push-controller sync-controller resolver-controller gitea; do
+            echo "Waiting for ${deploy}..."
+            kubectl rollout status deployment/${deploy} \
+              --namespace=git-system --timeout=120s
+          done
+          # Verify Gitea API is responsive.
+          for i in $(seq 1 15); do
             if kubectl exec -n git-system deploy/gitea -- \
               curl -sf http://localhost:3000/api/v1/version; then
               echo ""
@@ -162,7 +162,7 @@ jobs:
               break
             fi
             echo "Waiting for Gitea API (attempt $i)..."
-            sleep 2
+            sleep 1
           done
 
       - name: Create Gitea admin user
