@@ -11,17 +11,14 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage/memory"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/reconciler"
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
-	"github.com/imjasonh/git-k8s/pkg/reconciler/internal"
 )
 
 // Reconciler implements the reconcile logic for GitPushTransaction.
@@ -31,20 +28,9 @@ type Reconciler struct {
 }
 
 // ReconcileKind processes a single GitPushTransaction resource.
-func (r *Reconciler) ReconcileKind(ctx context.Context, key string) reconciler.Event {
+func (r *Reconciler) ReconcileKind(ctx context.Context, txn *gitv1alpha1.GitPushTransaction) reconciler.Event {
 	logger := logging.FromContext(ctx)
-
-	namespace, name := internal.SplitKey(key)
-
-	// Fetch the GitPushTransaction.
-	txn, err := r.gitClient.GitPushTransactions(namespace).Get(ctx, name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		logger.Debugf("GitPushTransaction %s/%s no longer exists", namespace, name)
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("getting GitPushTransaction %s/%s: %w", namespace, name, err)
-	}
+	namespace := txn.Namespace
 
 	// Skip if already terminal.
 	if txn.Status.Phase == gitv1alpha1.TransactionPhaseSucceeded ||
@@ -57,7 +43,7 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, key string) reconciler.E
 	now := metav1.Now()
 	txn.Status.Phase = gitv1alpha1.TransactionPhaseInProgress
 	txn.Status.StartTime = &now
-	txn, err = r.gitClient.GitPushTransactions(namespace).UpdateStatus(ctx, txn, metav1.UpdateOptions{})
+	txn, err := r.gitClient.GitPushTransactions(namespace).UpdateStatus(ctx, txn, metav1.UpdateOptions{})
 	if err != nil {
 		return fmt.Errorf("updating status to InProgress: %w", err)
 	}
@@ -95,7 +81,7 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, key string) reconciler.E
 		logger.Warnf("Failed to update branch CRs after push: %v", err)
 	}
 
-	logger.Infof("Successfully pushed transaction %s/%s", namespace, name)
+	logger.Infof("Successfully pushed transaction %s/%s", namespace, txn.Name)
 	return nil
 }
 
@@ -223,21 +209,4 @@ func (r *Reconciler) updateBranches(ctx context.Context, namespace string, txn *
 		}
 	}
 	return nil
-}
-
-// Ensure Reconciler implements the reconciler interface.
-var _ reconciler.LeaderAware = (*Reconciler)(nil)
-
-// Promote implements LeaderAware.
-func (r *Reconciler) Promote(bkt reconciler.Bucket, enq func(reconciler.Bucket, types.NamespacedName)) error {
-	return nil
-}
-
-// Demote implements LeaderAware.
-func (r *Reconciler) Demote(bkt reconciler.Bucket) {
-}
-
-// Reconcile implements the controller.Reconciler interface.
-func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
-	return r.ReconcileKind(ctx, key)
 }

@@ -39,7 +39,7 @@ func TestSplitKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.key, func(t *testing.T) {
-			ns, name := SplitKey(tt.key)
+			ns, name := splitKey(tt.key)
 			if ns != tt.wantNS {
 				t.Errorf("namespace = %q, want %q", ns, tt.wantNS)
 			}

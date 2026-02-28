@@ -7,16 +7,13 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/storage/memory"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/reconciler"
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
-	"github.com/imjasonh/git-k8s/pkg/reconciler/internal"
 )
 
 // Reconciler implements the reconcile logic for GitRepoSync.
@@ -25,21 +22,11 @@ type Reconciler struct {
 	gitClient     *gitclient.GitV1alpha1Client
 }
 
-// Reconcile implements the controller.Reconciler interface.
-func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
+// ReconcileKind processes a single GitRepoSync resource.
+func (r *Reconciler) ReconcileKind(ctx context.Context, syncObj *gitv1alpha1.GitRepoSync) reconciler.Event {
 	logger := logging.FromContext(ctx)
-
-	namespace, name := internal.SplitKey(key)
-
-	// Fetch the GitRepoSync resource.
-	syncObj, err := r.gitClient.GitRepoSyncs(namespace).Get(ctx, name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		logger.Debugf("GitRepoSync %s/%s no longer exists", namespace, name)
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("getting GitRepoSync %s/%s: %w", namespace, name, err)
-	}
+	namespace := syncObj.Namespace
+	name := syncObj.Name
 
 	// Get the branches for both repos.
 	branchA, err := r.findBranch(ctx, namespace, syncObj.Spec.RepoA.Name, syncObj.Spec.BranchName)
@@ -210,14 +197,4 @@ func (r *Reconciler) updateSyncStatus(ctx context.Context, syncObj *gitv1alpha1.
 
 	_, err := r.gitClient.GitRepoSyncs(syncObj.Namespace).UpdateStatus(ctx, syncObj, metav1.UpdateOptions{})
 	return err
-}
-
-// Ensure Reconciler implements the reconciler interface.
-var _ reconciler.LeaderAware = (*Reconciler)(nil)
-
-func (r *Reconciler) Promote(bkt reconciler.Bucket, enq func(reconciler.Bucket, types.NamespacedName)) error {
-	return nil
-}
-
-func (r *Reconciler) Demote(bkt reconciler.Bucket) {
 }

@@ -9,16 +9,13 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/reconciler"
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
-	"github.com/imjasonh/git-k8s/pkg/reconciler/internal"
 )
 
 // Reconciler implements the reconcile logic for resolving conflicted GitRepoSyncs.
@@ -27,28 +24,17 @@ type Reconciler struct {
 	gitClient     *gitclient.GitV1alpha1Client
 }
 
-// Reconcile implements the controller.Reconciler interface.
-func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
+// ReconcileKind processes a single GitRepoSync resource that is in the Conflicted phase.
+func (r *Reconciler) ReconcileKind(ctx context.Context, syncObj *gitv1alpha1.GitRepoSync) reconciler.Event {
 	logger := logging.FromContext(ctx)
-
-	namespace, name := internal.SplitKey(key)
-
-	// Fetch the GitRepoSync.
-	syncObj, err := r.gitClient.GitRepoSyncs(namespace).Get(ctx, name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		logger.Debugf("GitRepoSync %s/%s no longer exists", namespace, name)
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("getting GitRepoSync %s/%s: %w", namespace, name, err)
-	}
+	namespace := syncObj.Namespace
 
 	// Only process if still conflicted.
 	if syncObj.Status.Phase != gitv1alpha1.SyncPhaseConflicted {
 		return nil
 	}
 
-	logger.Infof("Attempting to resolve conflict for %s/%s", namespace, name)
+	logger.Infof("Attempting to resolve conflict for %s/%s", namespace, syncObj.Name)
 
 	// Get the repo URLs.
 	repoA, err := r.gitClient.GitRepositories(namespace).Get(ctx, syncObj.Spec.RepoA.Name, metav1.GetOptions{})
@@ -347,13 +333,4 @@ func (r *Reconciler) markManualIntervention(ctx context.Context, syncObj *gitv1a
 	syncObj.Status.Message = message
 	_, err := r.gitClient.GitRepoSyncs(syncObj.Namespace).UpdateStatus(ctx, syncObj, metav1.UpdateOptions{})
 	return err
-}
-
-var _ reconciler.LeaderAware = (*Reconciler)(nil)
-
-func (r *Reconciler) Promote(bkt reconciler.Bucket, enq func(reconciler.Bucket, types.NamespacedName)) error {
-	return nil
-}
-
-func (r *Reconciler) Demote(bkt reconciler.Bucket) {
 }
