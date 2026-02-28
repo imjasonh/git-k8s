@@ -35,6 +35,8 @@ tools:
   bash: true
   web-fetch:
 
+engine: claude
+
 timeout-minutes: 15
 ---
 

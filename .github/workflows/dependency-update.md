@@ -12,8 +12,9 @@ on:
 permissions: read-all
 
 network:
-  - defaults
-  - go
+  allowed:
+    - go
+  blocked: []
 
 safe-outputs:
   create-pull-request:
@@ -31,6 +32,8 @@ tools:
   web-fetch:
   github:
     toolsets: [pull_requests, repos, issues]
+
+engine: claude
 
 timeout-minutes: 30
 ---

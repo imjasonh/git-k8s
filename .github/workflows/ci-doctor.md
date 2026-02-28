@@ -38,6 +38,8 @@ tools:
   github:
     toolsets: [pull_requests, repos, issues]
 
+engine: claude
+
 timeout-minutes: 20
 ---
 
