@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/reconciler"
 
@@ -254,7 +255,7 @@ func splitKey(key string) (string, string, error) {
 var _ reconciler.LeaderAware = (*Reconciler)(nil)
 
 // Promote implements LeaderAware.
-func (r *Reconciler) Promote(bkt reconciler.Bucket, enq func(bkt reconciler.Bucket, key string) error) error {
+func (r *Reconciler) Promote(bkt reconciler.Bucket, enq func(reconciler.Bucket, types.NamespacedName)) error {
 	return nil
 }
 
