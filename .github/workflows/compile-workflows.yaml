@@ -13,7 +13,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  workflows: write
 
 jobs:
   compile:
@@ -24,23 +23,27 @@ jobs:
       - name: Checkout (push)
         if: github.event_name == 'push'
         uses: actions/checkout@v4
+        with:
+          # A PAT with workflows scope is required to push .lock.yml
+          # files under .github/workflows/.
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Checkout (PR head branch)
         if: github.event_name == 'pull_request'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Install gh-aw extension
         run: gh extension install github/gh-aw
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
 
       - name: Compile all agentic workflows
         run: gh aw compile .github/workflows/*.md
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
 
       - name: Commit and push lock files if changed
         run: |
