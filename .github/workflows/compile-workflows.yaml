@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   compile:
@@ -19,7 +20,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (push)
+        if: github.event_name == 'push'
+        uses: actions/checkout@v4
+
+      - name: Checkout (PR head branch)
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          # Use default GITHUB_TOKEN — needs contents: write permission
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install gh-aw extension
         run: gh extension install github/gh-aw
@@ -31,13 +42,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Check for lock file changes
+      - name: Commit and push lock files if changed
         run: |
           git add .github/workflows/*.lock.yml
           if git diff --cached --quiet; then
             echo "Lock files are up to date."
           else
-            echo "::error::Lock files are outdated. Run 'gh aw compile .github/workflows/*.md' and commit the results."
-            git diff --cached --stat
-            exit 1
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "Recompile agentic workflow lock files"
+            git push
           fi
