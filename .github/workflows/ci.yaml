@@ -94,7 +94,7 @@ jobs:
 
       - name: Deploy Gitea git server
         run: |
-          cat <<'EOF' | kubectl apply -f -
+          kubectl apply -f - <<'EOF'
           apiVersion: apps/v1
           kind: Deployment
           metadata:
@@ -137,7 +137,8 @@ jobs:
                 volumes:
                 - name: data
                   emptyDir: {}
-          ---
+          EOF
+          kubectl apply -f - <<'EOF'
           apiVersion: v1
           kind: Service
           metadata:
