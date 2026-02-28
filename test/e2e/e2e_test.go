@@ -27,7 +27,7 @@ const (
 	giteaUsername = "testadmin"
 	giteaPassword = "testpassword123"
 
-	pollInterval = 2 * time.Second
+	pollInterval = 1 * time.Second
 	pollTimeout  = 2 * time.Minute
 )
 
