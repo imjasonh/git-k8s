@@ -29,6 +29,12 @@ type GitRepositorySpec struct {
 	// Auth contains authentication configuration for the repository.
 	// +optional
 	Auth *GitAuth `json:"auth,omitempty"`
+
+	// PollInterval is how often to poll the remote for ref changes.
+	// Specified as a duration string (e.g., "5s", "30s", "1m").
+	// If unset, the controller's default poll interval is used.
+	// +optional
+	PollInterval *metav1.Duration `json:"pollInterval,omitempty"`
 }
 
 // GitAuth contains authentication details for accessing a Git repository.
