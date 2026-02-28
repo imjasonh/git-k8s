@@ -87,15 +87,15 @@ jobs:
 
       - name: Verify CRDs are installed
         run: |
-          kubectl get crd gitrepositories.git.k8s.io
-          kubectl get crd gitbranches.git.k8s.io
-          kubectl get crd gitpushtransactions.git.k8s.io
-          kubectl get crd gitreposyncs.git.k8s.io
+          kubectl get crd gitrepositories.git-k8s.imjasonh.com
+          kubectl get crd gitbranches.git-k8s.imjasonh.com
+          kubectl get crd gitpushtransactions.git-k8s.imjasonh.com
+          kubectl get crd gitreposyncs.git-k8s.imjasonh.com
 
       - name: Smoke test - create a GitRepository
         run: |
           cat <<EOF | kubectl apply -f -
-          apiVersion: git.k8s.io/v1alpha1
+          apiVersion: git-k8s.imjasonh.com/v1alpha1
           kind: GitRepository
           metadata:
             name: test-repo

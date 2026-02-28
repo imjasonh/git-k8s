@@ -162,8 +162,8 @@ func (r *Reconciler) createPushTransaction(ctx context.Context, namespace string
 			GenerateName: fmt.Sprintf("%s-sync-", syncObj.Name),
 			Namespace:    namespace,
 			Labels: map[string]string{
-				"git.k8s.io/repo-sync": syncObj.Name,
-				"git.k8s.io/target":    targetRepo,
+				"git-k8s.imjasonh.com/repo-sync": syncObj.Name,
+				"git-k8s.imjasonh.com/target":    targetRepo,
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
