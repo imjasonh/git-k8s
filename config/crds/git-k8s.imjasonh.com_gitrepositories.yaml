@@ -46,6 +46,9 @@ spec:
                           type: string
                       required:
                         - name
+                pollInterval:
+                  type: string
+                  description: How often to poll the remote for ref changes (e.g., "5s", "30s", "1m").
             status:
               type: object
               properties:

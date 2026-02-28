@@ -10,7 +10,7 @@ git-k8s is a Kubernetes-native controller system for managing Git repositories a
 
 ## Architecture
 
-### Three-Controller Design
+### Four-Controller Design
 
 1. **Push Controller** (`cmd/push-controller/`) — Watches `GitPushTransaction` resources, clones repos into memory using go-git, executes atomic pushes, and updates transaction status through phases (Pending → InProgress → Succeeded/Failed).
 
@@ -18,11 +18,13 @@ git-k8s is a Kubernetes-native controller system for managing Git repositories a
 
 3. **Resolver Controller** (`cmd/resolver-controller/`) — Watches `GitRepoSync` resources in Conflicted phase. Performs automated 3-way merge with file-level conflict detection. Creates merge commits and push transactions to both repos. Falls back to `RequiresManualIntervention` on failure.
 
+4. **Repo Watcher Controller** (`cmd/repo-watcher-controller/`) — Watches `GitRepository` resources and polls their remotes via `git ls-remote` on a configurable interval. Auto-creates, updates, and deletes `GitBranch` CRDs to reflect the actual state of the remote. Enables fast detection of external pushes to trigger downstream sync.
+
 ### Custom Resources (CRDs)
 
 | CRD | Purpose |
 |-----|---------|
-| `GitRepository` | Defines a managed Git repo (clone URL, default branch, auth) |
+| `GitRepository` | Defines a managed Git repo (clone URL, default branch, auth, poll interval) |
 | `GitBranch` | Tracks a branch within a repo (head commit, last updated) |
 | `GitPushTransaction` | Atomic push operation with refspecs and CAS support |
 | `GitRepoSync` | Two-way sync relationship between two repositories |
@@ -39,6 +41,7 @@ CRD manifests live in `config/crds/`.
 | `pkg/reconciler/push` | Push transaction reconciliation logic |
 | `pkg/reconciler/sync` | Repo sync reconciliation logic |
 | `pkg/reconciler/resolver` | Conflict resolution via 3-way merge |
+| `pkg/reconciler/repowatcher` | Remote polling and GitBranch CRD lifecycle |
 
 ## Directory Structure
 
@@ -47,6 +50,7 @@ cmd/                          # Controller entry points
   push-controller/
   sync-controller/
   resolver-controller/
+  repo-watcher-controller/
 pkg/
   apis/git/v1alpha1/          # CRD types, scheme, defaults, deepcopy
   client/                     # Typed client wrapper (manual, not generated)
@@ -55,6 +59,7 @@ pkg/
     push/                     # Push transaction controller + reconciler
     sync/                     # Sync controller + reconciler
     resolver/                 # Conflict resolver controller + reconciler
+    repowatcher/              # Remote polling + GitBranch lifecycle
 config/
   crds/                       # CRD YAML manifests
   rbac/                       # RBAC role definitions
@@ -80,6 +85,7 @@ hack/                         # Code generation scripts
 go build ./cmd/push-controller/
 go build ./cmd/sync-controller/
 go build ./cmd/resolver-controller/
+go build ./cmd/repo-watcher-controller/
 
 # Run unit tests
 go test ./...
@@ -151,3 +157,17 @@ GitHub Actions (`.github/workflows/ci.yaml`) runs two jobs:
 2. **E2E** — Sets up KinD cluster, installs CRDs, deploys controllers via `ko`, deploys Gitea, runs e2e tests with `-tags=e2e`
 
 Container images use `ko` with a `gcr.io/distroless/static:nonroot` base image (configured in `.ko.yaml`).
+
+## Go Module Download Workaround
+
+In some CI/cloud environments, `go mod download` (and `go build`, `go test`, etc.) may fail with DNS resolution errors for `storage.googleapis.com`. This happens when the `no_proxy` / `NO_PROXY` environment variable includes `*.googleapis.com`, causing Go's HTTP client to bypass the egress proxy and attempt direct DNS resolution, which fails.
+
+**Fix:** Strip `*.googleapis.com` from `no_proxy` so that requests to `storage.googleapis.com` (where the Go module proxy stores zip files) route through the egress proxy:
+
+```bash
+NO_PROXY=$(echo "$no_proxy" | sed 's/,\*\.googleapis\.com//; s/\*\.googleapis\.com,//; s/\*\.googleapis\.com//') \
+no_proxy=$(echo "$no_proxy" | sed 's/,\*\.googleapis\.com//; s/\*\.googleapis\.com,//; s/\*\.googleapis\.com//') \
+  go mod download
+```
+
+Apply the same prefix to `go build`, `go test`, `go vet`, etc. when downloading new modules.

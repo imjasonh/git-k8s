@@ -27,6 +27,7 @@ jobs:
           go build ./cmd/push-controller/
           go build ./cmd/sync-controller/
           go build ./cmd/resolver-controller/
+          go build ./cmd/repo-watcher-controller/
 
       - name: Test
         run: go test ./...
@@ -148,7 +149,7 @@ jobs:
       - name: Wait for controllers and Gitea
         run: |
           # Wait for everything in parallel.
-          for deploy in push-controller sync-controller resolver-controller gitea; do
+          for deploy in push-controller sync-controller resolver-controller repo-watcher-controller gitea; do
             echo "Waiting for ${deploy}..."
             kubectl rollout status deployment/${deploy} \
               --namespace=git-system --timeout=120s
@@ -198,7 +199,7 @@ jobs:
         if: ${{ failure() }}
         run: |
           echo "=== Controller logs ==="
-          for ctrl in push-controller sync-controller resolver-controller; do
+          for ctrl in push-controller sync-controller resolver-controller repo-watcher-controller; do
             echo "--- ${ctrl} ---"
             kubectl logs -n git-system deploy/${ctrl} --tail=50 2>/dev/null || true
           done
