@@ -1,6 +1,10 @@
 name: Compile Agentic Workflows
 
 on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/*.md"
   push:
     branches: ["main"]
     paths:
@@ -23,23 +27,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Compile all agentic workflows
-        run: |
-          for f in .github/workflows/*.md; do
-            echo "Compiling ${f}..."
-            gh aw compile "$f"
-          done
+        run: gh aw compile .github/workflows/*.md
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Commit and push lock files if changed
+      - name: Check for lock file changes
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git add .github/workflows/*.lock.yml
           if git diff --cached --quiet; then
-            echo "No lock file changes to commit."
+            echo "Lock files are up to date."
           else
-            git commit -m "Recompile agentic workflow lock files"
-            git push
+            echo "::error::Lock files are outdated. Run 'gh aw compile .github/workflows/*.md' and commit the results."
+            git diff --cached --stat
+            exit 1
           fi
