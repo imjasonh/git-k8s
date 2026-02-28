@@ -6,50 +6,6 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
-func TestSplitKey(t *testing.T) {
-	tests := []struct {
-		key      string
-		wantNS   string
-		wantName string
-	}{
-		{
-			key:      "default/my-sync",
-			wantNS:   "default",
-			wantName: "my-sync",
-		},
-		{
-			key:      "git-system/resolver",
-			wantNS:   "git-system",
-			wantName: "resolver",
-		},
-		{
-			key:      "just-name",
-			wantNS:   "",
-			wantName: "just-name",
-		},
-		{
-			key:      "",
-			wantNS:   "",
-			wantName: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.key, func(t *testing.T) {
-			ns, name, err := splitKey(tt.key)
-			if err != nil {
-				t.Fatalf("splitKey(%q) error = %v", tt.key, err)
-			}
-			if ns != tt.wantNS {
-				t.Errorf("namespace = %q, want %q", ns, tt.wantNS)
-			}
-			if name != tt.wantName {
-				t.Errorf("name = %q, want %q", name, tt.wantName)
-			}
-		})
-	}
-}
-
 func TestChangeName(t *testing.T) {
 	tests := []struct {
 		name   string

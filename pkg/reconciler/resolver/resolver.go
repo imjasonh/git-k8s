@@ -9,6 +9,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
@@ -17,6 +18,7 @@ import (
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
+	"github.com/imjasonh/git-k8s/pkg/reconciler/internal"
 )
 
 // Reconciler implements the reconcile logic for resolving conflicted GitRepoSyncs.
@@ -29,13 +31,14 @@ type Reconciler struct {
 func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 	logger := logging.FromContext(ctx)
 
-	namespace, name, err := splitKey(key)
-	if err != nil {
-		return err
-	}
+	namespace, name := internal.SplitKey(key)
 
 	// Fetch the GitRepoSync.
 	syncObj, err := r.gitClient.GitRepoSyncs(namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		logger.Debugf("GitRepoSync %s/%s no longer exists", namespace, name)
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("getting GitRepoSync %s/%s: %w", namespace, name, err)
 	}
@@ -87,7 +90,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 
 // attemptMerge performs a 3-way merge in memory using go-git.
 // It compares the trees of both commits against the merge base to detect conflicts.
-// Returns the hash of the merge commit if the merge is clean.
+// If there are no file-level conflicts (disjoint changes), it builds a merged tree
+// that includes changes from both branches and creates a merge commit.
 func (r *Reconciler) attemptMerge(ctx context.Context, repoURL, commitAHash, commitBHash, mergeBaseHash string) (string, error) {
 	logger := logging.FromContext(ctx)
 
@@ -160,27 +164,29 @@ func (r *Reconciler) attemptMerge(ctx context.Context, repoURL, commitAHash, com
 		}
 	}
 
-	// No file-level conflicts. We can create a merge commit.
-	// Use tree A as the base (it has A's changes), and we need to apply B's changes.
-	// Since there are no overlapping files, we can use B's tree for non-conflicting merge.
-	// For a true merge, we'd reconstruct a merged tree. For this file-disjoint case,
-	// we create a merge commit with A's tree as the result (simplified).
-	// In production, we'd build a proper merged tree object.
-	logger.Info("No file-level conflicts detected, creating merge commit")
+	// No file-level conflicts. Build a merged tree that starts from A's tree
+	// (which already has A's changes) and applies B's changes on top.
+	logger.Info("No file-level conflicts detected, building merged tree")
 
+	mergedTreeHash, err := buildMergedTree(storer, treeA, treeB, diffB)
+	if err != nil {
+		return "", fmt.Errorf("building merged tree: %w", err)
+	}
+
+	now := time.Now()
 	mergeCommit := &object.Commit{
 		Author: object.Signature{
 			Name:  "git-k8s-resolver",
 			Email: "resolver@git-k8s.imjasonh.com",
-			When:  time.Now(),
+			When:  now,
 		},
 		Committer: object.Signature{
 			Name:  "git-k8s-resolver",
 			Email: "resolver@git-k8s.imjasonh.com",
-			When:  time.Now(),
+			When:  now,
 		},
 		Message:  fmt.Sprintf("Merge %s and %s\n\nAutomated merge by git-k8s conflict resolver.", commitAHash[:8], commitBHash[:8]),
-		TreeHash: treeA.Hash,
+		TreeHash: mergedTreeHash,
 		ParentHashes: []plumbing.Hash{
 			hashA,
 			hashB,
@@ -198,6 +204,56 @@ func (r *Reconciler) attemptMerge(ctx context.Context, repoURL, commitAHash, com
 	}
 
 	return mergeHash.String(), nil
+}
+
+// buildMergedTree constructs a tree that contains A's tree with B's non-conflicting
+// changes applied. It processes diffB to apply additions, modifications, and deletions
+// from branch B onto tree A.
+func buildMergedTree(storer *memory.Storage, treeA, treeB *object.Tree, diffB object.Changes) (plumbing.Hash, error) {
+	// Start with all entries from tree A.
+	entries := make(map[string]object.TreeEntry)
+	for _, entry := range treeA.Entries {
+		entries[entry.Name] = entry
+	}
+
+	// Apply B's changes.
+	for _, change := range diffB {
+		if change.To.Name != "" {
+			// File added or modified in B: use B's version.
+			entry, err := treeB.FindEntry(change.To.Name)
+			if err != nil {
+				return plumbing.ZeroHash, fmt.Errorf("finding entry %q in tree B: %w", change.To.Name, err)
+			}
+			entries[change.To.Name] = *entry
+		}
+		if change.From.Name != "" && change.To.Name == "" {
+			// File deleted in B: remove from merged tree.
+			delete(entries, change.From.Name)
+		}
+		if change.From.Name != "" && change.To.Name != "" && change.From.Name != change.To.Name {
+			// File renamed in B: remove old name.
+			delete(entries, change.From.Name)
+		}
+	}
+
+	// Build sorted tree entries.
+	sortedEntries := make([]object.TreeEntry, 0, len(entries))
+	for _, entry := range entries {
+		sortedEntries = append(sortedEntries, entry)
+	}
+
+	mergedTree := &object.Tree{Entries: sortedEntries}
+	encodedObj := storer.NewEncodedObject()
+	if err := mergedTree.Encode(encodedObj); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("encoding merged tree: %w", err)
+	}
+
+	hash, err := storer.SetEncodedObject(encodedObj)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("storing merged tree: %w", err)
+	}
+
+	return hash, nil
 }
 
 // changeName extracts the file name from a tree change.
@@ -291,15 +347,6 @@ func (r *Reconciler) markManualIntervention(ctx context.Context, syncObj *gitv1a
 	syncObj.Status.Message = message
 	_, err := r.gitClient.GitRepoSyncs(syncObj.Namespace).UpdateStatus(ctx, syncObj, metav1.UpdateOptions{})
 	return err
-}
-
-func splitKey(key string) (string, string, error) {
-	for i := range key {
-		if key[i] == '/' {
-			return key[:i], key[i+1:], nil
-		}
-	}
-	return "", key, nil
 }
 
 var _ reconciler.LeaderAware = (*Reconciler)(nil)

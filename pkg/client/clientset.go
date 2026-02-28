@@ -47,8 +47,13 @@ func WithClient(ctx context.Context, client *GitV1alpha1Client) context.Context 
 }
 
 // Get retrieves the GitV1alpha1Client from the context.
+// Panics if no client has been stored via WithClient.
 func Get(ctx context.Context) *GitV1alpha1Client {
-	return ctx.Value(contextKey{}).(*GitV1alpha1Client)
+	v, ok := ctx.Value(contextKey{}).(*GitV1alpha1Client)
+	if !ok {
+		panic("git-k8s client not found in context; use client.WithClient to inject it")
+	}
+	return v
 }
 
 var (
