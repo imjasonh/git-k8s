@@ -111,7 +111,7 @@ jobs:
               spec:
                 containers:
                 - name: gitea
-                  image: gitea/gitea:1.21
+                  image: gitea/gitea:1.21-rootless
                   ports:
                   - containerPort: 3000
                     name: http
@@ -132,9 +132,13 @@ jobs:
                       memory: 256Mi
                   volumeMounts:
                   - name: data
-                    mountPath: /data
+                    mountPath: /var/lib/gitea
+                  - name: config
+                    mountPath: /etc/gitea
                 volumes:
                 - name: data
+                  emptyDir: {}
+                - name: config
                   emptyDir: {}
           EOF
           kubectl apply -f - <<'EOF'
