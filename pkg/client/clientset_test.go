@@ -7,9 +7,41 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	fakedynamic "k8s.io/client-go/dynamic/fake"
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 )
+
+func newFakeScheme() *runtime.Scheme {
+	scheme := runtime.NewScheme()
+	for _, kind := range []string{
+		"GitRepository", "GitBranch", "GitPushTransaction", "GitRepoSync",
+	} {
+		scheme.AddKnownTypeWithName(
+			schema.GroupVersionKind{Group: "git-k8s.imjasonh.com", Version: "v1alpha1", Kind: kind},
+			&unstructured.Unstructured{},
+		)
+		scheme.AddKnownTypeWithName(
+			schema.GroupVersionKind{Group: "git-k8s.imjasonh.com", Version: "v1alpha1", Kind: kind + "List"},
+			&unstructured.UnstructuredList{},
+		)
+	}
+	return scheme
+}
+
+var customListKinds = map[schema.GroupVersionResource]string{
+	{Group: "git-k8s.imjasonh.com", Version: "v1alpha1", Resource: "gitrepositories"}:    "GitRepositoryList",
+	{Group: "git-k8s.imjasonh.com", Version: "v1alpha1", Resource: "gitbranches"}:         "GitBranchList",
+	{Group: "git-k8s.imjasonh.com", Version: "v1alpha1", Resource: "gitpushtransactions"}: "GitPushTransactionList",
+	{Group: "git-k8s.imjasonh.com", Version: "v1alpha1", Resource: "gitreposyncs"}:        "GitRepoSyncList",
+}
+
+func newFakeClient(objects ...runtime.Object) *GitV1alpha1Client {
+	dynClient := fakedynamic.NewSimpleDynamicClientWithCustomListKinds(newFakeScheme(), customListKinds, objects...)
+	return NewFromDynamic(dynClient)
+}
 
 func TestToUnstructured(t *testing.T) {
 	repo := &gitv1alpha1.GitRepository{
@@ -294,5 +326,254 @@ func TestToUnstructured_PreservesJSON(t *testing.T) {
 	}
 	if got := spec["branchName"]; got != "feature/awesome" {
 		t.Errorf("branchName = %v, want %q", got, "feature/awesome")
+	}
+}
+
+func TestNewFromDynamic(t *testing.T) {
+	dynClient := fakedynamic.NewSimpleDynamicClient(newFakeScheme())
+	gc := NewFromDynamic(dynClient)
+	if gc == nil {
+		t.Fatal("NewFromDynamic returned nil")
+	}
+	if gc.client != dynClient {
+		t.Error("NewFromDynamic did not store the dynamic client")
+	}
+}
+
+func TestGitRepositories_CRUD(t *testing.T) {
+	c := newFakeClient()
+	ctx := context.Background()
+
+	// Create.
+	repo := &gitv1alpha1.GitRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-repo",
+			Namespace: "default",
+		},
+		Spec: gitv1alpha1.GitRepositorySpec{
+			URL:           "https://example.com/repo.git",
+			DefaultBranch: "main",
+		},
+	}
+	created, err := c.GitRepositories("default").Create(ctx, repo, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.Name != "test-repo" {
+		t.Errorf("Name = %q, want %q", created.Name, "test-repo")
+	}
+
+	// Get.
+	got, err := c.GitRepositories("default").Get(ctx, "test-repo", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got.Spec.URL != "https://example.com/repo.git" {
+		t.Errorf("URL = %q, want %q", got.Spec.URL, "https://example.com/repo.git")
+	}
+
+	// Update.
+	got.Spec.DefaultBranch = "develop"
+	updated, err := c.GitRepositories("default").Update(ctx, got, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if updated.Spec.DefaultBranch != "develop" {
+		t.Errorf("DefaultBranch = %q, want %q", updated.Spec.DefaultBranch, "develop")
+	}
+
+	// UpdateStatus.
+	now := metav1.Now()
+	updated.Status.LastFetchTime = &now
+	statusUpdated, err := c.GitRepositories("default").UpdateStatus(ctx, updated, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("UpdateStatus() error = %v", err)
+	}
+	if statusUpdated.Status.LastFetchTime == nil {
+		t.Error("LastFetchTime should be set")
+	}
+
+	// List.
+	list, err := c.GitRepositories("default").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(list.Items) != 1 {
+		t.Errorf("List Items = %d, want 1", len(list.Items))
+	}
+
+	// Delete.
+	if err := c.GitRepositories("default").Delete(ctx, "test-repo", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	list, err = c.GitRepositories("default").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(list.Items) != 0 {
+		t.Errorf("List after Delete = %d, want 0", len(list.Items))
+	}
+}
+
+func TestGitBranches_CRUD(t *testing.T) {
+	c := newFakeClient()
+	ctx := context.Background()
+
+	branch := &gitv1alpha1.GitBranch{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-branch",
+			Namespace: "default",
+		},
+		Spec: gitv1alpha1.GitBranchSpec{
+			RepositoryRef: "my-repo",
+			BranchName:    "main",
+		},
+	}
+
+	created, err := c.GitBranches("default").Create(ctx, branch, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.Spec.BranchName != "main" {
+		t.Errorf("BranchName = %q, want %q", created.Spec.BranchName, "main")
+	}
+
+	got, err := c.GitBranches("default").Get(ctx, "test-branch", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	got.Status.HeadCommit = "abc123"
+	_, err = c.GitBranches("default").UpdateStatus(ctx, got, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("UpdateStatus() error = %v", err)
+	}
+
+	got.Spec.BranchName = "develop"
+	_, err = c.GitBranches("default").Update(ctx, got, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	list, err := c.GitBranches("default").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(list.Items) != 1 {
+		t.Errorf("List Items = %d, want 1", len(list.Items))
+	}
+
+	if err := c.GitBranches("default").Delete(ctx, "test-branch", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+}
+
+func TestGitPushTransactions_CRUD(t *testing.T) {
+	c := newFakeClient()
+	ctx := context.Background()
+
+	txn := &gitv1alpha1.GitPushTransaction{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "push-1",
+			Namespace: "default",
+		},
+		Spec: gitv1alpha1.GitPushTransactionSpec{
+			RepositoryRef: "my-repo",
+			Atomic:        true,
+			RefSpecs: []gitv1alpha1.PushRefSpec{
+				{Source: "refs/heads/main", Destination: "refs/heads/main"},
+			},
+		},
+	}
+
+	created, err := c.GitPushTransactions("default").Create(ctx, txn, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if !created.Spec.Atomic {
+		t.Error("Atomic should be true")
+	}
+
+	got, err := c.GitPushTransactions("default").Get(ctx, "push-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	got.Status.Phase = gitv1alpha1.TransactionPhaseSucceeded
+	_, err = c.GitPushTransactions("default").UpdateStatus(ctx, got, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("UpdateStatus() error = %v", err)
+	}
+
+	got.Spec.Atomic = false
+	_, err = c.GitPushTransactions("default").Update(ctx, got, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	list, err := c.GitPushTransactions("default").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(list.Items) != 1 {
+		t.Errorf("List Items = %d, want 1", len(list.Items))
+	}
+
+	if err := c.GitPushTransactions("default").Delete(ctx, "push-1", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+}
+
+func TestGitRepoSyncs_CRUD(t *testing.T) {
+	c := newFakeClient()
+	ctx := context.Background()
+
+	sync := &gitv1alpha1.GitRepoSync{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sync-1",
+			Namespace: "default",
+		},
+		Spec: gitv1alpha1.GitRepoSyncSpec{
+			RepoA:      gitv1alpha1.SyncRepoRef{Name: "repo-a"},
+			RepoB:      gitv1alpha1.SyncRepoRef{Name: "repo-b"},
+			BranchName: "main",
+		},
+	}
+
+	created, err := c.GitRepoSyncs("default").Create(ctx, sync, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.Spec.BranchName != "main" {
+		t.Errorf("BranchName = %q, want %q", created.Spec.BranchName, "main")
+	}
+
+	got, err := c.GitRepoSyncs("default").Get(ctx, "sync-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	got.Status.Phase = gitv1alpha1.SyncPhaseInSync
+	_, err = c.GitRepoSyncs("default").UpdateStatus(ctx, got, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("UpdateStatus() error = %v", err)
+	}
+
+	got.Spec.BranchName = "develop"
+	_, err = c.GitRepoSyncs("default").Update(ctx, got, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	list, err := c.GitRepoSyncs("default").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(list.Items) != 1 {
+		t.Errorf("List Items = %d, want 1", len(list.Items))
+	}
+
+	if err := c.GitRepoSyncs("default").Delete(ctx, "sync-1", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("Delete() error = %v", err)
 	}
 }
