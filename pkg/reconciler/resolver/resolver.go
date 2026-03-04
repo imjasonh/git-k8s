@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/go-git/go-git/v5"
@@ -227,6 +228,9 @@ func buildMergedTree(storer *memory.Storage, treeA, treeB *object.Tree, diffB ob
 	for _, entry := range entries {
 		sortedEntries = append(sortedEntries, entry)
 	}
+	sort.Slice(sortedEntries, func(i, j int) bool {
+		return sortedEntries[i].Name < sortedEntries[j].Name
+	})
 
 	mergedTree := &object.Tree{Entries: sortedEntries}
 	encodedObj := storer.NewEncodedObject()
