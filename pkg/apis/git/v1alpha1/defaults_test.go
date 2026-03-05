@@ -2,6 +2,8 @@ package v1alpha1
 
 import (
 	"testing"
+
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 func TestSetDefaults_GitRepository(t *testing.T) {
@@ -65,5 +67,33 @@ func TestSetDefaults_GitPushTransaction(t *testing.T) {
 				t.Errorf("Phase = %q, want %q", got, tt.wantPhase)
 			}
 		})
+	}
+}
+
+func TestRegisterDefaults(t *testing.T) {
+	scheme := runtime.NewScheme()
+
+	// Register the types so the scheme knows about them.
+	if err := AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+
+	// Register defaults.
+	if err := RegisterDefaults(scheme); err != nil {
+		t.Fatalf("RegisterDefaults() error = %v", err)
+	}
+
+	// Verify GitRepository defaults are applied via scheme.
+	repo := &GitRepository{}
+	scheme.Default(repo)
+	if repo.Spec.DefaultBranch != "main" {
+		t.Errorf("DefaultBranch after scheme.Default = %q, want %q", repo.Spec.DefaultBranch, "main")
+	}
+
+	// Verify GitPushTransaction defaults are applied via scheme.
+	txn := &GitPushTransaction{}
+	scheme.Default(txn)
+	if txn.Status.Phase != TransactionPhasePending {
+		t.Errorf("Phase after scheme.Default = %q, want %q", txn.Status.Phase, TransactionPhasePending)
 	}
 }
