@@ -28,4 +28,26 @@ var (
 		Help:      "Duration of Git operations (clone, push, ls-remote).",
 		Buckets:   prometheus.ExponentialBuckets(0.1, 3, 8), // 100ms to ~3.6min
 	}, []string{"operation"})
+
+	// WorkspaceAcquireDuration tracks how long it takes to acquire a workspace.
+	WorkspaceAcquireDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "gitkube",
+		Name:      "workspace_acquire_duration_seconds",
+		Help:      "Duration of workspace acquire operations.",
+		Buckets:   prometheus.ExponentialBuckets(0.1, 3, 8),
+	}, []string{"mode"})
+
+	// WorkspaceCacheHit tracks cache hits in workspace acquisition.
+	WorkspaceCacheHit = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "gitkube",
+		Name:      "workspace_cache_hit_total",
+		Help:      "Total number of workspace cache hits.",
+	})
+
+	// WorkspaceCacheMiss tracks cache misses in workspace acquisition.
+	WorkspaceCacheMiss = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "gitkube",
+		Name:      "workspace_cache_miss_total",
+		Help:      "Total number of workspace cache misses.",
+	})
 )

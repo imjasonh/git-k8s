@@ -2,29 +2,28 @@ package sync
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
-	"time"
 
-	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/storage/memory"
+	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/reconciler"
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
-	"github.com/imjasonh/git-k8s/pkg/metrics"
+	"github.com/imjasonh/git-k8s/pkg/workspace"
 )
-
-// DefaultGitTimeout is the maximum duration for a single Git clone operation.
-const DefaultGitTimeout = 5 * time.Minute
 
 // Reconciler implements the reconcile logic for GitRepoSync.
 type Reconciler struct {
 	dynamicClient dynamic.Interface
 	gitClient     *gitclient.GitV1alpha1Client
+	workspaces    *workspace.Manager
 }
 
 // ReconcileKind processes a single GitRepoSync resource.
@@ -64,7 +63,14 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, syncObj *gitv1alpha1.Git
 		return fmt.Errorf("getting repo A: %w", err)
 	}
 
-	mergeBase, err := r.calculateMergeBase(ctx, repoASpec.Spec.URL, commitA, commitB)
+	// Resolve auth for cloning.
+	auth, err := r.resolveAuth(ctx, namespace, repoASpec)
+	if err != nil {
+		return fmt.Errorf("resolving auth for repo A: %w", err)
+	}
+
+	cacheEnabled := repoASpec.Spec.Cache != nil && repoASpec.Spec.Cache.Enabled
+	mergeBase, err := r.calculateMergeBase(ctx, repoASpec.Spec.URL, commitA, commitB, auth, cacheEnabled)
 	if err != nil {
 		return r.updateSyncStatus(ctx, syncObj, gitv1alpha1.SyncPhaseConflicted,
 			fmt.Sprintf("calculating merge base: %v", err), commitA, commitB, "")
@@ -112,23 +118,21 @@ func (r *Reconciler) findBranch(ctx context.Context, namespace, repoName, branch
 	return nil, fmt.Errorf("branch %q not found for repo %q", branchName, repoName)
 }
 
-// calculateMergeBase computes the merge base between two commits entirely in memory.
-// It clones the repository into memory, then walks the commit history to find the
-// common ancestor.
-func (r *Reconciler) calculateMergeBase(ctx context.Context, repoURL, commitAHash, commitBHash string) (string, error) {
-	// Clone into memory.
-	cloneCtx, cloneCancel := context.WithTimeout(ctx, DefaultGitTimeout)
-	defer cloneCancel()
-
-	cloneStart := time.Now()
-	storer := memory.NewStorage()
-	repo, err := git.CloneContext(cloneCtx, storer, nil, &git.CloneOptions{
-		URL: repoURL,
-	})
-	metrics.GitOperationDuration.WithLabelValues("clone").Observe(time.Since(cloneStart).Seconds())
+// calculateMergeBase computes the merge base between two commits using the workspace manager.
+// Merge-base calculation requires full history, so the workspace will be deepened if shallow.
+func (r *Reconciler) calculateMergeBase(ctx context.Context, repoURL, commitAHash, commitBHash string, auth *http.BasicAuth, cacheEnabled bool) (string, error) {
+	ws, err := r.workspaces.Acquire(ctx, repoURL, auth, cacheEnabled)
 	if err != nil {
-		return "", fmt.Errorf("cloning for merge base: %w", err)
+		return "", fmt.Errorf("acquiring workspace for merge base: %w", err)
 	}
+	defer r.workspaces.Release(ws)
+
+	// Merge-base needs full history; deepen if the workspace was shallow-cloned.
+	if err := r.workspaces.Deepen(ctx, ws, auth); err != nil {
+		return "", fmt.Errorf("deepening workspace: %w", err)
+	}
+
+	repo := ws.Repo
 
 	hashA := plumbing.NewHash(commitAHash)
 	hashB := plumbing.NewHash(commitBHash)
@@ -143,7 +147,6 @@ func (r *Reconciler) calculateMergeBase(ctx context.Context, repoURL, commitAHas
 		return "", fmt.Errorf("getting commit B (%s): %w", commitBHash, err)
 	}
 
-	// Use go-git's merge base calculation.
 	bases, err := commitA.MergeBase(commitB)
 	if err != nil {
 		return "", fmt.Errorf("calculating merge base: %w", err)
@@ -207,4 +210,36 @@ func (r *Reconciler) updateSyncStatus(ctx context.Context, syncObj *gitv1alpha1.
 
 	_, err := r.gitClient.GitRepoSyncs(syncObj.Namespace).UpdateStatus(ctx, syncObj, metav1.UpdateOptions{})
 	return err
+}
+
+// resolveAuth retrieves Git authentication credentials from the referenced Secret.
+func (r *Reconciler) resolveAuth(ctx context.Context, namespace string, repo *gitv1alpha1.GitRepository) (*http.BasicAuth, error) {
+	if repo.Spec.Auth == nil || repo.Spec.Auth.SecretRef == nil {
+		return nil, nil
+	}
+
+	secretGVR := corev1.SchemeGroupVersion.WithResource("secrets")
+	u, err := r.dynamicClient.Resource(secretGVR).Namespace(namespace).Get(ctx, repo.Spec.Auth.SecretRef.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("getting secret %q: %w", repo.Spec.Auth.SecretRef.Name, err)
+	}
+
+	data, found, err := unstructured.NestedStringMap(u.Object, "data")
+	if err != nil || !found {
+		return nil, fmt.Errorf("reading secret data: found=%v err=%v", found, err)
+	}
+
+	username, err := base64.StdEncoding.DecodeString(data["username"])
+	if err != nil {
+		return nil, fmt.Errorf("decoding username: %w", err)
+	}
+	password, err := base64.StdEncoding.DecodeString(data["password"])
+	if err != nil {
+		return nil, fmt.Errorf("decoding password: %w", err)
+	}
+
+	return &http.BasicAuth{
+		Username: string(username),
+		Password: string(password),
+	}, nil
 }
