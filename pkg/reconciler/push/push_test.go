@@ -13,6 +13,7 @@ import (
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
+	"github.com/imjasonh/git-k8s/pkg/gitauth"
 	"github.com/imjasonh/git-k8s/pkg/workspace"
 )
 
@@ -318,9 +319,9 @@ func TestResolveAuth_NoAuth(t *testing.T) {
 		},
 	}
 
-	auth, err := r.resolveAuth(context.Background(), "default", repo)
+	auth, err := gitauth.ResolveAuth(context.Background(), r.dynamicClient, "default", repo)
 	if err != nil {
-		t.Fatalf("resolveAuth() error = %v", err)
+		t.Fatalf("ResolveAuth() error = %v", err)
 	}
 	if auth != nil {
 		t.Errorf("auth = %v, want nil for repo without auth", auth)
@@ -354,9 +355,9 @@ func TestResolveAuth_WithSecret(t *testing.T) {
 		},
 	}
 
-	auth, err := r.resolveAuth(context.Background(), "default", repo)
+	auth, err := gitauth.ResolveAuth(context.Background(), r.dynamicClient, "default", repo)
 	if err != nil {
-		t.Fatalf("resolveAuth() error = %v", err)
+		t.Fatalf("ResolveAuth() error = %v", err)
 	}
 	if auth == nil {
 		t.Fatal("auth = nil, want non-nil")

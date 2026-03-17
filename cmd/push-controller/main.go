@@ -17,9 +17,10 @@ func main() {
 	go health.ServeMetrics(ctx, ":9090") //nolint:errcheck
 
 	// GIT_CACHE_DIR enables PVC-backed workspace caching when set.
-	// Push controller uses shallow clones since it only needs to push refs.
+	// Push controller needs full history to resolve refs referenced by
+	// push transactions (e.g., older tags or historical commits).
 	cacheDir := os.Getenv("GIT_CACHE_DIR")
-	wsMgr := workspace.NewManager(cacheDir, true /* shallow */)
+	wsMgr := workspace.NewManager(cacheDir, false)
 	ctx = workspace.WithManager(ctx, wsMgr)
 
 	sharedmain.MainWithContext(ctx, "push-controller", push.NewController)

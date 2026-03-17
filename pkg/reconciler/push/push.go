@@ -2,7 +2,6 @@ package push
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"time"
 
@@ -10,15 +9,14 @@ import (
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/reconciler"
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
+	"github.com/imjasonh/git-k8s/pkg/gitauth"
 	"github.com/imjasonh/git-k8s/pkg/metrics"
 	"github.com/imjasonh/git-k8s/pkg/workspace"
 )
@@ -61,7 +59,7 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, txn *gitv1alpha1.GitPush
 	}
 
 	// Resolve authentication.
-	auth, err := r.resolveAuth(ctx, namespace, repo)
+	auth, err := gitauth.ResolveAuth(ctx, r.dynamicClient, namespace, repo)
 	if err != nil {
 		return r.failTransaction(ctx, txn, fmt.Sprintf("resolving auth: %v", err))
 	}
@@ -144,42 +142,6 @@ func (r *Reconciler) executePush(ctx context.Context, repoURL string, spec gitv1
 	}
 
 	return resultCommit, nil
-}
-
-// resolveAuth retrieves Git authentication credentials from the referenced Secret.
-func (r *Reconciler) resolveAuth(ctx context.Context, namespace string, repo *gitv1alpha1.GitRepository) (*http.BasicAuth, error) {
-	if repo.Spec.Auth == nil || repo.Spec.Auth.SecretRef == nil {
-		return nil, nil
-	}
-
-	// Use the dynamic client to fetch the Secret.
-	secretGVR := corev1.SchemeGroupVersion.WithResource("secrets")
-	u, err := r.dynamicClient.Resource(secretGVR).Namespace(namespace).Get(ctx, repo.Spec.Auth.SecretRef.Name, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("getting secret %q: %w", repo.Spec.Auth.SecretRef.Name, err)
-	}
-
-	data, found, err := unstructured.NestedStringMap(u.Object, "data")
-	if err != nil || !found {
-		return nil, fmt.Errorf("reading secret data: found=%v err=%v", found, err)
-	}
-
-	// Secret data values are base64-encoded in the API response when
-	// accessed via the dynamic client (unlike the typed client which
-	// decodes automatically into []byte fields).
-	username, err := base64.StdEncoding.DecodeString(data["username"])
-	if err != nil {
-		return nil, fmt.Errorf("decoding username: %w", err)
-	}
-	password, err := base64.StdEncoding.DecodeString(data["password"])
-	if err != nil {
-		return nil, fmt.Errorf("decoding password: %w", err)
-	}
-
-	return &http.BasicAuth{
-		Username: string(username),
-		Password: string(password),
-	}, nil
 }
 
 // failTransaction marks a GitPushTransaction as Failed with the given message.

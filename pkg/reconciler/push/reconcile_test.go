@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
+	"github.com/imjasonh/git-k8s/pkg/gitauth"
 )
 
 func TestReconcileKind_PendingToInProgress(t *testing.T) {
@@ -148,7 +149,7 @@ func TestResolveAuth_MissingSecret(t *testing.T) {
 		},
 	}
 
-	_, err := r.resolveAuth(context.Background(), "default", repo)
+	_, err := gitauth.ResolveAuth(context.Background(), r.dynamicClient, "default", repo)
 	if err == nil {
 		t.Fatal("resolveAuth() should return error for missing secret")
 	}
@@ -176,7 +177,7 @@ func TestResolveAuth_InvalidBase64(t *testing.T) {
 		},
 	}
 
-	_, err := r.resolveAuth(context.Background(), "default", repo)
+	_, err := gitauth.ResolveAuth(context.Background(), r.dynamicClient, "default", repo)
 	if err == nil {
 		t.Fatal("resolveAuth() should return error for invalid base64")
 	}

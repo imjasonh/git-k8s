@@ -424,3 +424,91 @@ func TestInMemoryStorerCompatibility(t *testing.T) {
 		t.Fatal("repo is nil")
 	}
 }
+
+// Test that Release properly decrements ref count and cleans up the active map.
+func TestRelease_RefCountCleanup(t *testing.T) {
+	sourceDir := t.TempDir()
+	barePath, _ := initBareRepo(t, sourceDir)
+
+	cacheDir := t.TempDir()
+	m := NewManager(cacheDir, false)
+	ctx := testCtx(t)
+
+	ws, err := m.Acquire(ctx, barePath, nil, true)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	// After acquire, ref should exist with count 1.
+	m.mu.Lock()
+	r, ok := m.active[ws.path]
+	m.mu.Unlock()
+	if !ok {
+		t.Fatal("expected active ref after acquire")
+	}
+	if r.count != 1 {
+		t.Errorf("ref count after acquire = %d, want 1", r.count)
+	}
+
+	m.Release(ws)
+
+	// After release, the ref should be cleaned up from the active map.
+	m.mu.Lock()
+	_, ok = m.active[ws.path]
+	m.mu.Unlock()
+	if ok {
+		t.Error("expected active ref to be cleaned up after release")
+	}
+}
+
+// Test that multiple acquire/release cycles don't leak refs.
+func TestRelease_NoRefLeak(t *testing.T) {
+	sourceDir := t.TempDir()
+	barePath, _ := initBareRepo(t, sourceDir)
+
+	cacheDir := t.TempDir()
+	m := NewManager(cacheDir, false)
+	ctx := testCtx(t)
+
+	for i := 0; i < 5; i++ {
+		ws, err := m.Acquire(ctx, barePath, nil, true)
+		if err != nil {
+			t.Fatalf("Acquire #%d: %v", i, err)
+		}
+		m.Release(ws)
+	}
+
+	// After all cycles, active map should be empty.
+	m.mu.Lock()
+	activeCount := len(m.active)
+	m.mu.Unlock()
+	if activeCount != 0 {
+		t.Errorf("active map has %d entries, want 0 after all releases", activeCount)
+	}
+}
+
+// Test that GC skips directories with active references.
+func TestGC_SkipsActiveRefs(t *testing.T) {
+	sourceDir := t.TempDir()
+	barePath, _ := initBareRepo(t, sourceDir)
+
+	cacheDir := t.TempDir()
+	m := NewManager(cacheDir, false)
+	ctx := testCtx(t)
+
+	// Acquire a workspace (creates a cached dir and holds a ref).
+	ws, err := m.Acquire(ctx, barePath, nil, true)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	// Run GC with empty activeRepos — the cache dir should survive because
+	// there's an active in-process reference.
+	m.GC(ctx, map[string]bool{})
+
+	if _, err := os.Stat(ws.path); os.IsNotExist(err) {
+		t.Error("GC should not remove dir with active references")
+	}
+
+	m.Release(ws)
+}
