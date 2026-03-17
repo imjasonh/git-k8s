@@ -48,6 +48,7 @@ func NewController(ctx context.Context, cmw configmap.Watcher) *controller.Impl 
 	}
 
 	impl := controller.NewContext(ctx, internal.NewReconciler(
+		"repowatcher",
 		func(ctx context.Context, namespace, name string) (*gitv1alpha1.GitRepository, error) {
 			return gitClient.GitRepositories(namespace).Get(ctx, name, metav1.GetOptions{})
 		},

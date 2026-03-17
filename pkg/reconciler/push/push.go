@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
@@ -19,7 +20,11 @@ import (
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
+	"github.com/imjasonh/git-k8s/pkg/metrics"
 )
+
+// DefaultGitTimeout is the maximum duration for a single Git operation (clone, push).
+const DefaultGitTimeout = 5 * time.Minute
 
 // Reconciler implements the reconcile logic for GitPushTransaction.
 type Reconciler struct {
@@ -90,11 +95,16 @@ func (r *Reconciler) executePush(ctx context.Context, repoURL string, spec gitv1
 	logger := logging.FromContext(ctx)
 
 	// Clone into memory - keeps the controller stateless.
+	cloneCtx, cloneCancel := context.WithTimeout(ctx, DefaultGitTimeout)
+	defer cloneCancel()
+
+	cloneStart := time.Now()
 	storer := memory.NewStorage()
-	gitRepo, err := git.Clone(storer, nil, &git.CloneOptions{
+	gitRepo, err := git.CloneContext(cloneCtx, storer, nil, &git.CloneOptions{
 		URL:  repoURL,
 		Auth: auth,
 	})
+	metrics.GitOperationDuration.WithLabelValues("clone").Observe(time.Since(cloneStart).Seconds())
 	if err != nil {
 		return "", fmt.Errorf("cloning repository: %w", err)
 	}
@@ -114,14 +124,20 @@ func (r *Reconciler) executePush(ctx context.Context, repoURL string, spec gitv1
 		Atomic:     spec.Atomic,
 	}
 
+	pushCtx, pushCancel := context.WithTimeout(ctx, DefaultGitTimeout)
+	defer pushCancel()
+
+	pushStart := time.Now()
 	logger.Infof("Pushing %d refspec(s) to %s (atomic=%v)", len(refSpecs), repoURL, spec.Atomic)
-	if err := gitRepo.PushContext(ctx, pushOpts); err != nil {
+	if err := gitRepo.PushContext(pushCtx, pushOpts); err != nil {
 		if err == git.NoErrAlreadyUpToDate {
 			logger.Info("Push: already up to date")
 		} else {
+			metrics.GitOperationDuration.WithLabelValues("push").Observe(time.Since(pushStart).Seconds())
 			return "", fmt.Errorf("executing push: %w", err)
 		}
 	}
+	metrics.GitOperationDuration.WithLabelValues("push").Observe(time.Since(pushStart).Seconds())
 
 	// Get the resulting commit SHA from the first refspec's source.
 	var resultCommit string

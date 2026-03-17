@@ -35,7 +35,7 @@ func TestNewReconciler(t *testing.T) {
 	get := func(ctx context.Context, ns, name string) (*testResource, error) {
 		return &testResource{Namespace: ns, Name: name}, nil
 	}
-	r := NewReconciler(get, inner)
+	r := NewReconciler("test", get, inner)
 	if r == nil {
 		t.Fatal("NewReconciler returned nil")
 	}
@@ -54,7 +54,7 @@ func TestReconcile_Success(t *testing.T) {
 		return nil, fmt.Errorf("unexpected get(%q, %q)", ns, name)
 	}
 
-	r := NewReconciler(get, inner)
+	r := NewReconciler("test", get, inner)
 	err := r.Reconcile(context.Background(), "default/my-obj")
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -73,7 +73,7 @@ func TestReconcile_NotFound(t *testing.T) {
 		return nil, apierrors.NewNotFound(schema.GroupResource{Group: "test", Resource: "resources"}, name)
 	}
 
-	r := NewReconciler(get, inner)
+	r := NewReconciler("test", get, inner)
 	err := r.Reconcile(context.Background(), "default/deleted-obj")
 	if err != nil {
 		t.Fatalf("Reconcile() should return nil for not-found, got %v", err)
@@ -89,7 +89,7 @@ func TestReconcile_GetError(t *testing.T) {
 		return nil, fmt.Errorf("connection refused")
 	}
 
-	r := NewReconciler(get, inner)
+	r := NewReconciler("test", get, inner)
 	err := r.Reconcile(context.Background(), "default/my-obj")
 	if err == nil {
 		t.Fatal("Reconcile() should return error on get failure")
@@ -105,7 +105,7 @@ func TestReconcile_ReconcileKindError(t *testing.T) {
 		return &testResource{Namespace: ns, Name: name}, nil
 	}
 
-	r := NewReconciler(get, inner)
+	r := NewReconciler("test", get, inner)
 	err := r.Reconcile(context.Background(), "default/my-obj")
 	if err == nil {
 		t.Fatal("Reconcile() should propagate ReconcileKind error")
@@ -118,7 +118,7 @@ func TestReconcile_ClusterScopedKey(t *testing.T) {
 		return &testResource{Namespace: ns, Name: name}, nil
 	}
 
-	r := NewReconciler(get, inner)
+	r := NewReconciler("test", get, inner)
 	err := r.Reconcile(context.Background(), "cluster-resource")
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -135,7 +135,7 @@ func TestReconcile_ClusterScopedKey(t *testing.T) {
 }
 
 func TestPromote(t *testing.T) {
-	r := NewReconciler(
+	r := NewReconciler("test",
 		func(ctx context.Context, ns, name string) (*testResource, error) { return nil, nil },
 		&testKindReconciler{},
 	)
@@ -147,7 +147,7 @@ func TestPromote(t *testing.T) {
 }
 
 func TestDemote(t *testing.T) {
-	r := NewReconciler(
+	r := NewReconciler("test",
 		func(ctx context.Context, ns, name string) (*testResource, error) { return nil, nil },
 		&testKindReconciler{},
 	)

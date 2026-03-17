@@ -16,7 +16,11 @@ import (
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
+	"github.com/imjasonh/git-k8s/pkg/metrics"
 )
+
+// DefaultGitTimeout is the maximum duration for a single Git clone operation.
+const DefaultGitTimeout = 5 * time.Minute
 
 // Reconciler implements the reconcile logic for resolving conflicted GitRepoSyncs.
 type Reconciler struct {
@@ -82,10 +86,15 @@ func (r *Reconciler) attemptMerge(ctx context.Context, repoURL, commitAHash, com
 	logger := logging.FromContext(ctx)
 
 	// Clone into memory.
+	cloneCtx, cloneCancel := context.WithTimeout(ctx, DefaultGitTimeout)
+	defer cloneCancel()
+
+	cloneStart := time.Now()
 	storer := memory.NewStorage()
-	repo, err := git.Clone(storer, nil, &git.CloneOptions{
+	repo, err := git.CloneContext(cloneCtx, storer, nil, &git.CloneOptions{
 		URL: repoURL,
 	})
+	metrics.GitOperationDuration.WithLabelValues("clone").Observe(time.Since(cloneStart).Seconds())
 	if err != nil {
 		return "", fmt.Errorf("cloning for merge: %w", err)
 	}
