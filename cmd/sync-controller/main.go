@@ -2,10 +2,15 @@ package main
 
 import (
 	"knative.dev/pkg/injection/sharedmain"
+	"knative.dev/pkg/signals"
 
+	"github.com/imjasonh/git-k8s/pkg/health"
+	_ "github.com/imjasonh/git-k8s/pkg/metrics" // register Prometheus metrics
 	"github.com/imjasonh/git-k8s/pkg/reconciler/sync"
 )
 
 func main() {
-	sharedmain.Main("sync-controller", sync.NewController)
+	ctx := signals.NewContext()
+	go health.ServeMetrics(ctx, ":9090") //nolint:errcheck
+	sharedmain.MainWithContext(ctx, "sync-controller", sync.NewController)
 }

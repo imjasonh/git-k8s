@@ -22,6 +22,25 @@ spec:
         - name: controller
           # ko will replace this with the actual registry image SHA.
           image: ko://github.com/imjasonh/git-k8s/cmd/sync-controller
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readiness
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 15
           env:
             - name: SYSTEM_NAMESPACE
               valueFrom:

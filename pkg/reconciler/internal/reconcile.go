@@ -3,11 +3,14 @@ package internal
 import (
 	"context"
 	"fmt"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/reconciler"
+
+	"github.com/imjasonh/git-k8s/pkg/metrics"
 )
 
 // KindReconciler is the interface that a developer implements.
@@ -22,8 +25,9 @@ type KindReconciler[T any] interface {
 // workqueue key, fetching the typed resource, and ignoring not-found (deleted)
 // resources — exactly what Knative's generated reconcilers do.
 type reconcilerImpl[T any] struct {
-	get   func(ctx context.Context, namespace, name string) (*T, error)
-	inner KindReconciler[T]
+	controllerName string
+	get            func(ctx context.Context, namespace, name string) (*T, error)
+	inner          KindReconciler[T]
 }
 
 // Verify interface conformance.
@@ -33,15 +37,17 @@ var _ reconciler.LeaderAware = (*reconcilerImpl[any])(nil)
 // that implements Reconcile(ctx, key) error. The get function fetches the typed
 // resource by namespace and name.
 func NewReconciler[T any](
+	controllerName string,
 	get func(ctx context.Context, namespace, name string) (*T, error),
 	inner KindReconciler[T],
 ) *reconcilerImpl[T] {
-	return &reconcilerImpl[T]{get: get, inner: inner}
+	return &reconcilerImpl[T]{controllerName: controllerName, get: get, inner: inner}
 }
 
 // Reconcile implements the controller.Reconciler interface.
 func (r *reconcilerImpl[T]) Reconcile(ctx context.Context, key string) error {
 	logger := logging.FromContext(ctx)
+	start := time.Now()
 
 	namespace, name := splitKey(key)
 
@@ -51,10 +57,21 @@ func (r *reconcilerImpl[T]) Reconcile(ctx context.Context, key string) error {
 		return nil
 	}
 	if err != nil {
+		metrics.ReconcileCount.WithLabelValues(r.controllerName, "error").Inc()
 		return fmt.Errorf("getting %s/%s: %w", namespace, name, err)
 	}
 
-	return r.inner.ReconcileKind(ctx, o)
+	reconcileErr := r.inner.ReconcileKind(ctx, o)
+
+	duration := time.Since(start).Seconds()
+	metrics.ReconcileLatency.WithLabelValues(r.controllerName).Observe(duration)
+	if reconcileErr != nil {
+		metrics.ReconcileCount.WithLabelValues(r.controllerName, "error").Inc()
+	} else {
+		metrics.ReconcileCount.WithLabelValues(r.controllerName, "success").Inc()
+	}
+
+	return reconcileErr
 }
 
 // Promote implements reconciler.LeaderAware.

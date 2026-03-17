@@ -47,6 +47,7 @@ func NewController(ctx context.Context, cmw configmap.Watcher) *controller.Impl 
 	}
 
 	impl := controller.NewContext(ctx, internal.NewReconciler(
+		"resolver",
 		func(ctx context.Context, namespace, name string) (*gitv1alpha1.GitRepoSync, error) {
 			return gitClient.GitRepoSyncs(namespace).Get(ctx, name, metav1.GetOptions{})
 		},

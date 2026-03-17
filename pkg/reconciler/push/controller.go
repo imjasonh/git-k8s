@@ -48,6 +48,7 @@ func NewController(ctx context.Context, cmw configmap.Watcher) *controller.Impl 
 	}
 
 	impl := controller.NewContext(ctx, internal.NewReconciler(
+		"push",
 		func(ctx context.Context, namespace, name string) (*gitv1alpha1.GitPushTransaction, error) {
 			return gitClient.GitPushTransactions(namespace).Get(ctx, name, metav1.GetOptions{})
 		},

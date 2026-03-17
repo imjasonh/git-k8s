@@ -25,6 +25,7 @@ import (
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
+	"github.com/imjasonh/git-k8s/pkg/metrics"
 )
 
 // DefaultPollInterval is the default interval between remote ref polls.
@@ -68,7 +69,9 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, repo *gitv1alpha1.GitRep
 	}
 
 	// Run ls-remote to discover all remote refs.
+	lsStart := time.Now()
 	refs, err := r.lsRemote(repo.Spec.URL, auth)
+	metrics.GitOperationDuration.WithLabelValues("ls-remote").Observe(time.Since(lsStart).Seconds())
 	if err != nil {
 		return fmt.Errorf("ls-remote for %s: %w", repo.Spec.URL, err)
 	}
