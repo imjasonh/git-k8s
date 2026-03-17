@@ -3,6 +3,7 @@ package gitauth
 import (
 	"context"
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -124,7 +125,7 @@ func TestResolveAuth_MissingUsernameKey(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing username key")
 	}
-	if got := err.Error(); !contains(got, "missing required key") {
+	if got := err.Error(); !strings.Contains(got, "missing required key") {
 		t.Errorf("error = %q, want to contain %q", got, "missing required key")
 	}
 }
@@ -158,7 +159,7 @@ func TestResolveAuth_MissingPasswordKey(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing password key")
 	}
-	if got := err.Error(); !contains(got, "missing required key") {
+	if got := err.Error(); !strings.Contains(got, "missing required key") {
 		t.Errorf("error = %q, want to contain %q", got, "missing required key")
 	}
 }
@@ -186,15 +187,4 @@ func TestResolveAuth_SecretNotFound(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstring(s, substr))
-}
 
-func containsSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}

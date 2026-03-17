@@ -210,16 +210,15 @@ func (m *Manager) Release(ws *Workspace) {
 	}
 	m.mu.Lock()
 	r, ok := m.active[ws.path]
-	m.mu.Unlock()
 	if !ok {
+		m.mu.Unlock()
 		return
 	}
 	r.count--
 	if r.count == 0 {
-		m.mu.Lock()
 		delete(m.active, ws.path)
-		m.mu.Unlock()
 	}
+	m.mu.Unlock()
 	r.mu.Unlock()
 }
 
@@ -262,8 +261,9 @@ func (m *Manager) GC(ctx context.Context, activeRepos map[string]bool) {
 		// Skip paths with active in-process references.
 		m.mu.Lock()
 		r, hasRef := m.active[dirPath]
+		skip := hasRef && r.count > 0
 		m.mu.Unlock()
-		if hasRef && r.count > 0 {
+		if skip {
 			logger.Infof("GC: skipping %s (active references)", dirPath)
 			continue
 		}
