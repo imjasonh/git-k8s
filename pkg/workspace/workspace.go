@@ -107,10 +107,8 @@ func (m *Manager) acquireInMemory(ctx context.Context, repoURL string, auth *htt
 	})
 	metrics.WorkspaceAcquireDuration.WithLabelValues("memory").Observe(time.Since(start).Seconds())
 	if err != nil {
-		metrics.WorkspaceCacheMiss.Inc()
 		return nil, fmt.Errorf("in-memory clone: %w", err)
 	}
-	metrics.WorkspaceCacheMiss.Inc()
 
 	return &Workspace{
 		Repo: repo,
@@ -210,8 +208,18 @@ func (m *Manager) Release(ws *Workspace) {
 	if ws == nil || ws.manager == nil {
 		return
 	}
-	r := m.getRef(ws.path)
+	m.mu.Lock()
+	r, ok := m.active[ws.path]
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
 	r.count--
+	if r.count == 0 {
+		m.mu.Lock()
+		delete(m.active, ws.path)
+		m.mu.Unlock()
+	}
 	r.mu.Unlock()
 }
 
@@ -229,6 +237,8 @@ func (m *Manager) getRef(path string) *ref {
 }
 
 // GC removes cached directories that are not in the activeRepos set.
+// It skips paths that have active in-process references to avoid racing
+// with ongoing reconciles.
 func (m *Manager) GC(ctx context.Context, activeRepos map[string]bool) {
 	if m.basePath == "" {
 		return
@@ -246,11 +256,20 @@ func (m *Manager) GC(ctx context.Context, activeRepos map[string]bool) {
 			continue
 		}
 		dirPath := filepath.Join(m.basePath, entry.Name())
-		if !activeRepos[dirPath] {
-			logger.Infof("GC: removing stale cache dir %s", dirPath)
-			if err := os.RemoveAll(dirPath); err != nil {
-				logger.Warnf("GC: removing %s: %v", dirPath, err)
-			}
+		if activeRepos[dirPath] {
+			continue
+		}
+		// Skip paths with active in-process references.
+		m.mu.Lock()
+		r, hasRef := m.active[dirPath]
+		m.mu.Unlock()
+		if hasRef && r.count > 0 {
+			logger.Infof("GC: skipping %s (active references)", dirPath)
+			continue
+		}
+		logger.Infof("GC: removing stale cache dir %s", dirPath)
+		if err := os.RemoveAll(dirPath); err != nil {
+			logger.Warnf("GC: removing %s: %v", dirPath, err)
 		}
 	}
 }

@@ -80,19 +80,6 @@ spec:
                 lastFetchTime:
                   type: string
                   format: date-time
-                cache:
-                  type: object
-                  description: Cache health information.
-                  properties:
-                    lastCloneTime:
-                      type: string
-                      format: date-time
-                    lastFetchTime:
-                      type: string
-                      format: date-time
-                    sizeBytes:
-                      type: integer
-                      format: int64
       additionalPrinterColumns:
         - name: URL
           type: string

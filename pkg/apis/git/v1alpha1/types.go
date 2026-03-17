@@ -70,25 +70,6 @@ type GitRepositoryStatus struct {
 	// LastFetchTime is the timestamp of the last successful fetch.
 	// +optional
 	LastFetchTime *metav1.Time `json:"lastFetchTime,omitempty"`
-
-	// Cache contains cache health information.
-	// +optional
-	Cache *CacheStatus `json:"cache,omitempty"`
-}
-
-// CacheStatus reports the current state of the on-disk cache for a repository.
-type CacheStatus struct {
-	// LastCloneTime is the timestamp of the initial clone to disk.
-	// +optional
-	LastCloneTime *metav1.Time `json:"lastCloneTime,omitempty"`
-
-	// LastFetchTime is the timestamp of the last git fetch on the cached repo.
-	// +optional
-	LastFetchTime *metav1.Time `json:"lastFetchTime,omitempty"`
-
-	// SizeBytes is the approximate size of the cached repo on disk.
-	// +optional
-	SizeBytes int64 `json:"sizeBytes,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

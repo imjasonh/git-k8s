@@ -2,7 +2,6 @@ package resolver
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"time"
 
@@ -10,15 +9,14 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/storer"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/reconciler"
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
+	"github.com/imjasonh/git-k8s/pkg/gitauth"
 	"github.com/imjasonh/git-k8s/pkg/workspace"
 )
 
@@ -56,7 +54,7 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, syncObj *gitv1alpha1.Git
 	}
 
 	// Resolve auth for cloning.
-	auth, err := r.resolveAuth(ctx, namespace, repoA)
+	auth, err := gitauth.ResolveAuth(ctx, r.dynamicClient, namespace, repoA)
 	if err != nil {
 		return fmt.Errorf("resolving auth for repo A: %w", err)
 	}
@@ -353,34 +351,3 @@ func (r *Reconciler) markManualIntervention(ctx context.Context, syncObj *gitv1a
 	return err
 }
 
-// resolveAuth retrieves Git authentication credentials from the referenced Secret.
-func (r *Reconciler) resolveAuth(ctx context.Context, namespace string, repo *gitv1alpha1.GitRepository) (*http.BasicAuth, error) {
-	if repo.Spec.Auth == nil || repo.Spec.Auth.SecretRef == nil {
-		return nil, nil
-	}
-
-	secretGVR := corev1.SchemeGroupVersion.WithResource("secrets")
-	u, err := r.dynamicClient.Resource(secretGVR).Namespace(namespace).Get(ctx, repo.Spec.Auth.SecretRef.Name, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("getting secret %q: %w", repo.Spec.Auth.SecretRef.Name, err)
-	}
-
-	data, found, err := unstructured.NestedStringMap(u.Object, "data")
-	if err != nil || !found {
-		return nil, fmt.Errorf("reading secret data: found=%v err=%v", found, err)
-	}
-
-	username, err := base64.StdEncoding.DecodeString(data["username"])
-	if err != nil {
-		return nil, fmt.Errorf("decoding username: %w", err)
-	}
-	password, err := base64.StdEncoding.DecodeString(data["password"])
-	if err != nil {
-		return nil, fmt.Errorf("decoding password: %w", err)
-	}
-
-	return &http.BasicAuth{
-		Username: string(username),
-		Password: string(password),
-	}, nil
-}
