@@ -17,6 +17,7 @@ import (
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
 	"github.com/imjasonh/git-k8s/pkg/reconciler/internal"
+	"github.com/imjasonh/git-k8s/pkg/workspace"
 )
 
 var pushTransactionGVR = schema.GroupVersionResource{
@@ -45,6 +46,7 @@ func NewController(ctx context.Context, cmw configmap.Watcher) *controller.Impl 
 	r := &Reconciler{
 		dynamicClient: dynClient,
 		gitClient:     gitClient,
+		workspaces:    workspace.GetManager(ctx),
 	}
 
 	impl := controller.NewContext(ctx, internal.NewReconciler(

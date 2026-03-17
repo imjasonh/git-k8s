@@ -49,6 +49,15 @@ spec:
                 pollInterval:
                   type: string
                   description: How often to poll the remote for ref changes (e.g., "5s", "30s", "1m").
+                cache:
+                  type: object
+                  description: On-disk caching configuration for this repository.
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: Whether on-disk caching should be used for this repo.
+                  required:
+                    - enabled
             status:
               type: object
               properties:
@@ -71,6 +80,19 @@ spec:
                 lastFetchTime:
                   type: string
                   format: date-time
+                cache:
+                  type: object
+                  description: Cache health information.
+                  properties:
+                    lastCloneTime:
+                      type: string
+                      format: date-time
+                    lastFetchTime:
+                      type: string
+                      format: date-time
+                    sizeBytes:
+                      type: integer
+                      format: int64
       additionalPrinterColumns:
         - name: URL
           type: string

@@ -2,30 +2,31 @@ package resolver
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"time"
 
-	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/storage/memory"
+	"github.com/go-git/go-git/v5/plumbing/storer"
+	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/reconciler"
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
-	"github.com/imjasonh/git-k8s/pkg/metrics"
+	"github.com/imjasonh/git-k8s/pkg/workspace"
 )
-
-// DefaultGitTimeout is the maximum duration for a single Git clone operation.
-const DefaultGitTimeout = 5 * time.Minute
 
 // Reconciler implements the reconcile logic for resolving conflicted GitRepoSyncs.
 type Reconciler struct {
 	dynamicClient dynamic.Interface
 	gitClient     *gitclient.GitV1alpha1Client
+	workspaces    *workspace.Manager
 }
 
 // ReconcileKind processes a single GitRepoSync resource that is in the Conflicted phase.
@@ -54,8 +55,16 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, syncObj *gitv1alpha1.Git
 		return r.markManualIntervention(ctx, syncObj, "Missing commit hashes in status; cannot resolve")
 	}
 
-	// Attempt automated 3-way merge entirely in memory.
-	mergeCommitHash, err := r.attemptMerge(ctx, repoA.Spec.URL, commitAHash, commitBHash, mergeBaseHash)
+	// Resolve auth for cloning.
+	auth, err := r.resolveAuth(ctx, namespace, repoA)
+	if err != nil {
+		return fmt.Errorf("resolving auth for repo A: %w", err)
+	}
+
+	cacheEnabled := repoA.Spec.Cache != nil && repoA.Spec.Cache.Enabled
+
+	// Attempt automated 3-way merge.
+	mergeCommitHash, err := r.attemptMerge(ctx, repoA.Spec.URL, commitAHash, commitBHash, mergeBaseHash, auth, cacheEnabled)
 	if err != nil {
 		logger.Warnf("Automated merge failed: %v", err)
 		return r.markManualIntervention(ctx, syncObj, fmt.Sprintf("Automated merge failed: %v", err))
@@ -78,26 +87,25 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, syncObj *gitv1alpha1.Git
 	return nil
 }
 
-// attemptMerge performs a 3-way merge in memory using go-git.
+// attemptMerge performs a 3-way merge using the workspace manager.
 // It compares the trees of both commits against the merge base to detect conflicts.
 // If there are no file-level conflicts (disjoint changes), it builds a merged tree
 // that includes changes from both branches and creates a merge commit.
-func (r *Reconciler) attemptMerge(ctx context.Context, repoURL, commitAHash, commitBHash, mergeBaseHash string) (string, error) {
+func (r *Reconciler) attemptMerge(ctx context.Context, repoURL, commitAHash, commitBHash, mergeBaseHash string, auth *http.BasicAuth, cacheEnabled bool) (string, error) {
 	logger := logging.FromContext(ctx)
 
-	// Clone into memory.
-	cloneCtx, cloneCancel := context.WithTimeout(ctx, DefaultGitTimeout)
-	defer cloneCancel()
-
-	cloneStart := time.Now()
-	storer := memory.NewStorage()
-	repo, err := git.CloneContext(cloneCtx, storer, nil, &git.CloneOptions{
-		URL: repoURL,
-	})
-	metrics.GitOperationDuration.WithLabelValues("clone").Observe(time.Since(cloneStart).Seconds())
+	ws, err := r.workspaces.Acquire(ctx, repoURL, auth, cacheEnabled)
 	if err != nil {
-		return "", fmt.Errorf("cloning for merge: %w", err)
+		return "", fmt.Errorf("acquiring workspace for merge: %w", err)
 	}
+	defer r.workspaces.Release(ws)
+
+	// Merge needs full history; deepen if shallow.
+	if err := r.workspaces.Deepen(ctx, ws, auth); err != nil {
+		return "", fmt.Errorf("deepening workspace: %w", err)
+	}
+
+	repo := ws.Repo
 
 	hashA := plumbing.NewHash(commitAHash)
 	hashB := plumbing.NewHash(commitBHash)
@@ -163,7 +171,8 @@ func (r *Reconciler) attemptMerge(ctx context.Context, repoURL, commitAHash, com
 	// (which already has A's changes) and applies B's changes on top.
 	logger.Info("No file-level conflicts detected, building merged tree")
 
-	mergedTreeHash, err := buildMergedTree(storer, treeA, treeB, diffB)
+	st := repo.Storer
+	mergedTreeHash, err := buildMergedTree(st, treeA, treeB, diffB)
 	if err != nil {
 		return "", fmt.Errorf("building merged tree: %w", err)
 	}
@@ -188,12 +197,12 @@ func (r *Reconciler) attemptMerge(ctx context.Context, repoURL, commitAHash, com
 		},
 	}
 
-	encodedObj := storer.NewEncodedObject()
+	encodedObj := st.NewEncodedObject()
 	if err := mergeCommit.Encode(encodedObj); err != nil {
 		return "", fmt.Errorf("encoding merge commit: %w", err)
 	}
 
-	mergeHash, err := storer.SetEncodedObject(encodedObj)
+	mergeHash, err := st.SetEncodedObject(encodedObj)
 	if err != nil {
 		return "", fmt.Errorf("storing merge commit: %w", err)
 	}
@@ -204,7 +213,7 @@ func (r *Reconciler) attemptMerge(ctx context.Context, repoURL, commitAHash, com
 // buildMergedTree constructs a tree that contains A's tree with B's non-conflicting
 // changes applied. It processes diffB to apply additions, modifications, and deletions
 // from branch B onto tree A.
-func buildMergedTree(storer *memory.Storage, treeA, treeB *object.Tree, diffB object.Changes) (plumbing.Hash, error) {
+func buildMergedTree(st storer.EncodedObjectStorer, treeA, treeB *object.Tree, diffB object.Changes) (plumbing.Hash, error) {
 	// Start with all entries from tree A.
 	entries := make(map[string]object.TreeEntry)
 	for _, entry := range treeA.Entries {
@@ -238,12 +247,12 @@ func buildMergedTree(storer *memory.Storage, treeA, treeB *object.Tree, diffB ob
 	}
 
 	mergedTree := &object.Tree{Entries: sortedEntries}
-	encodedObj := storer.NewEncodedObject()
+	encodedObj := st.NewEncodedObject()
 	if err := mergedTree.Encode(encodedObj); err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("encoding merged tree: %w", err)
 	}
 
-	hash, err := storer.SetEncodedObject(encodedObj)
+	hash, err := st.SetEncodedObject(encodedObj)
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("storing merged tree: %w", err)
 	}
@@ -342,4 +351,36 @@ func (r *Reconciler) markManualIntervention(ctx context.Context, syncObj *gitv1a
 	syncObj.Status.Message = message
 	_, err := r.gitClient.GitRepoSyncs(syncObj.Namespace).UpdateStatus(ctx, syncObj, metav1.UpdateOptions{})
 	return err
+}
+
+// resolveAuth retrieves Git authentication credentials from the referenced Secret.
+func (r *Reconciler) resolveAuth(ctx context.Context, namespace string, repo *gitv1alpha1.GitRepository) (*http.BasicAuth, error) {
+	if repo.Spec.Auth == nil || repo.Spec.Auth.SecretRef == nil {
+		return nil, nil
+	}
+
+	secretGVR := corev1.SchemeGroupVersion.WithResource("secrets")
+	u, err := r.dynamicClient.Resource(secretGVR).Namespace(namespace).Get(ctx, repo.Spec.Auth.SecretRef.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("getting secret %q: %w", repo.Spec.Auth.SecretRef.Name, err)
+	}
+
+	data, found, err := unstructured.NestedStringMap(u.Object, "data")
+	if err != nil || !found {
+		return nil, fmt.Errorf("reading secret data: found=%v err=%v", found, err)
+	}
+
+	username, err := base64.StdEncoding.DecodeString(data["username"])
+	if err != nil {
+		return nil, fmt.Errorf("decoding username: %w", err)
+	}
+	password, err := base64.StdEncoding.DecodeString(data["password"])
+	if err != nil {
+		return nil, fmt.Errorf("decoding password: %w", err)
+	}
+
+	return &http.BasicAuth{
+		Username: string(username),
+		Password: string(password),
+	}, nil
 }

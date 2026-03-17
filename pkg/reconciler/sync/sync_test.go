@@ -12,6 +12,7 @@ import (
 
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
+	"github.com/imjasonh/git-k8s/pkg/workspace"
 )
 
 func newFakeScheme() *runtime.Scheme {
@@ -54,6 +55,7 @@ func newFakeReconciler(t *testing.T, objects ...*unstructured.Unstructured) *Rec
 	return &Reconciler{
 		dynamicClient: dynClient,
 		gitClient:     gc,
+		workspaces:    workspace.NewManager("", false),
 	}
 }
 

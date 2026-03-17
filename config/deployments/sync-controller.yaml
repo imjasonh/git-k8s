@@ -54,6 +54,9 @@ spec:
               value: config-logging
             - name: CONFIG_OBSERVABILITY_NAME
               value: config-observability
+            # Uncomment to enable PVC-backed git workspace caching:
+            # - name: GIT_CACHE_DIR
+            #   value: /data/repos
           resources:
             requests:
               cpu: 100m
@@ -61,6 +64,10 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
+          # Uncomment to enable PVC-backed git workspace caching:
+          # volumeMounts:
+          #   - name: git-cache
+          #     mountPath: /data/repos
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -68,3 +75,19 @@ spec:
             capabilities:
               drop:
                 - ALL
+      # Uncomment to enable PVC-backed git workspace caching:
+      # volumes:
+      #   - name: git-cache
+      #     persistentVolumeClaim:
+      #       claimName: git-cache-sync-controller
+# ---
+# apiVersion: v1
+# kind: PersistentVolumeClaim
+# metadata:
+#   name: git-cache-sync-controller
+#   namespace: git-system
+# spec:
+#   accessModes: [ReadWriteOnce]
+#   resources:
+#     requests:
+#       storage: 10Gi

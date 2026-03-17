@@ -10,7 +10,6 @@ import (
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
-	"github.com/go-git/go-git/v5/storage/memory"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -21,6 +20,7 @@ import (
 	gitv1alpha1 "github.com/imjasonh/git-k8s/pkg/apis/git/v1alpha1"
 	gitclient "github.com/imjasonh/git-k8s/pkg/client"
 	"github.com/imjasonh/git-k8s/pkg/metrics"
+	"github.com/imjasonh/git-k8s/pkg/workspace"
 )
 
 // DefaultGitTimeout is the maximum duration for a single Git operation (clone, push).
@@ -30,6 +30,7 @@ const DefaultGitTimeout = 5 * time.Minute
 type Reconciler struct {
 	dynamicClient dynamic.Interface
 	gitClient     *gitclient.GitV1alpha1Client
+	workspaces    *workspace.Manager
 }
 
 // ReconcileKind processes a single GitPushTransaction resource.
@@ -66,7 +67,8 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, txn *gitv1alpha1.GitPush
 	}
 
 	// Execute the push.
-	resultCommit, err := r.executePush(ctx, repo.Spec.URL, txn.Spec, auth)
+	cacheEnabled := repo.Spec.Cache != nil && repo.Spec.Cache.Enabled
+	resultCommit, err := r.executePush(ctx, repo.Spec.URL, txn.Spec, auth, cacheEnabled)
 	if err != nil {
 		return r.failTransaction(ctx, txn, fmt.Sprintf("push failed: %v", err))
 	}
@@ -90,24 +92,17 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, txn *gitv1alpha1.GitPush
 	return nil
 }
 
-// executePush performs the actual Git push using go-git with in-memory storage.
-func (r *Reconciler) executePush(ctx context.Context, repoURL string, spec gitv1alpha1.GitPushTransactionSpec, auth *http.BasicAuth) (string, error) {
+// executePush performs the actual Git push using the workspace manager.
+func (r *Reconciler) executePush(ctx context.Context, repoURL string, spec gitv1alpha1.GitPushTransactionSpec, auth *http.BasicAuth, cacheEnabled bool) (string, error) {
 	logger := logging.FromContext(ctx)
 
-	// Clone into memory - keeps the controller stateless.
-	cloneCtx, cloneCancel := context.WithTimeout(ctx, DefaultGitTimeout)
-	defer cloneCancel()
-
-	cloneStart := time.Now()
-	storer := memory.NewStorage()
-	gitRepo, err := git.CloneContext(cloneCtx, storer, nil, &git.CloneOptions{
-		URL:  repoURL,
-		Auth: auth,
-	})
-	metrics.GitOperationDuration.WithLabelValues("clone").Observe(time.Since(cloneStart).Seconds())
+	ws, err := r.workspaces.Acquire(ctx, repoURL, auth, cacheEnabled)
 	if err != nil {
-		return "", fmt.Errorf("cloning repository: %w", err)
+		return "", fmt.Errorf("acquiring workspace: %w", err)
 	}
+	defer r.workspaces.Release(ws)
+
+	gitRepo := ws.Repo
 
 	// Build refspecs for the push.
 	refSpecs := make([]config.RefSpec, 0, len(spec.RefSpecs))
@@ -128,7 +123,7 @@ func (r *Reconciler) executePush(ctx context.Context, repoURL string, spec gitv1
 	defer pushCancel()
 
 	pushStart := time.Now()
-	logger.Infof("Pushing %d refspec(s) to %s (atomic=%v)", len(refSpecs), repoURL, spec.Atomic)
+	logger.Infof("Pushing %d refspec(s) to %s (atomic=%v, mode=%s)", len(refSpecs), repoURL, spec.Atomic, ws.Mode)
 	if err := gitRepo.PushContext(pushCtx, pushOpts); err != nil {
 		if err == git.NoErrAlreadyUpToDate {
 			logger.Info("Push: already up to date")
@@ -142,7 +137,7 @@ func (r *Reconciler) executePush(ctx context.Context, repoURL string, spec gitv1
 	// Get the resulting commit SHA from the first refspec's source.
 	var resultCommit string
 	if len(spec.RefSpecs) > 0 {
-		ref, err := storer.Reference(plumbing.ReferenceName(spec.RefSpecs[0].Source))
+		ref, err := gitRepo.Reference(plumbing.ReferenceName(spec.RefSpecs[0].Source), true)
 		if err == nil {
 			resultCommit = ref.Hash().String()
 		}
