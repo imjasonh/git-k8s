@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/go-git/go-git/v5"
@@ -139,6 +140,15 @@ func TestAcquire_DiskClone_NewRepo(t *testing.T) {
 		t.Fatal("Repo is nil")
 	}
 
+	// Verify the workspace is in the worktrees directory (isolated).
+	if ws.path == "" {
+		t.Fatal("workspace path is empty")
+	}
+	wtBase := filepath.Join(cacheDir, "worktrees")
+	if rel, err := filepath.Rel(wtBase, ws.path); err != nil || rel[:2] == ".." {
+		t.Errorf("workspace path %q is not under worktrees dir %q", ws.path, wtBase)
+	}
+
 	// Verify we can read the commit.
 	head, err := ws.Repo.Head()
 	if err != nil {
@@ -149,6 +159,11 @@ func TestAcquire_DiskClone_NewRepo(t *testing.T) {
 	}
 
 	m.Release(ws)
+
+	// Worktree dir should be cleaned up after release.
+	if _, err := os.Stat(ws.path); !os.IsNotExist(err) {
+		t.Error("worktree dir should be removed after release")
+	}
 }
 
 func TestAcquire_DiskFetch_ExistingRepo(t *testing.T) {
@@ -439,9 +454,9 @@ func TestRelease_RefCountCleanup(t *testing.T) {
 		t.Fatalf("Acquire: %v", err)
 	}
 
-	// After acquire, ref should exist with count 1.
+	// After acquire, ref should exist with count 1 for the cache path.
 	m.mu.Lock()
-	r, ok := m.active[ws.path]
+	r, ok := m.active[ws.cachePath]
 	m.mu.Unlock()
 	if !ok {
 		t.Fatal("expected active ref after acquire")
@@ -454,7 +469,7 @@ func TestRelease_RefCountCleanup(t *testing.T) {
 
 	// After release, the ref should be cleaned up from the active map.
 	m.mu.Lock()
-	_, ok = m.active[ws.path]
+	_, ok = m.active[ws.cachePath]
 	m.mu.Unlock()
 	if ok {
 		t.Error("expected active ref to be cleaned up after release")
@@ -503,12 +518,219 @@ func TestGC_SkipsActiveRefs(t *testing.T) {
 	}
 
 	// Run GC with empty activeRepos — the cache dir should survive because
-	// there's an active in-process reference.
+	// there's an active in-process reference, and the worktree dir should
+	// survive because it's tracked as active.
 	m.GC(ctx, map[string]bool{})
 
+	if _, err := os.Stat(ws.cachePath); os.IsNotExist(err) {
+		t.Error("GC should not remove cache dir with active references")
+	}
 	if _, err := os.Stat(ws.path); os.IsNotExist(err) {
-		t.Error("GC should not remove dir with active references")
+		t.Error("GC should not remove active worktree dir")
 	}
 
 	m.Release(ws)
+}
+
+// Test that concurrent Acquire calls for the same repo work without blocking.
+func TestAcquire_ConcurrentSameRepo(t *testing.T) {
+	sourceDir := t.TempDir()
+	barePath, initialHash := initBareRepo(t, sourceDir)
+
+	cacheDir := t.TempDir()
+	m := NewManager(cacheDir, false)
+	ctx := testCtx(t)
+
+	const n = 5
+	workspaces := make([]*Workspace, n)
+	errs := make([]error, n)
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			workspaces[idx], errs[idx] = m.Acquire(ctx, barePath, nil, true)
+		}(i)
+	}
+	wg.Wait()
+
+	// All should succeed.
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			t.Fatalf("Acquire[%d]: %v", i, errs[i])
+		}
+	}
+
+	// Each workspace should be isolated (different paths).
+	paths := make(map[string]bool)
+	for i := 0; i < n; i++ {
+		ws := workspaces[i]
+		if ws.Mode != "disk" {
+			t.Errorf("ws[%d].Mode = %q, want disk", i, ws.Mode)
+		}
+		if paths[ws.path] {
+			t.Errorf("ws[%d] has duplicate path %q", i, ws.path)
+		}
+		paths[ws.path] = true
+
+		// All should share the same cache path.
+		if ws.cachePath != workspaces[0].cachePath {
+			t.Errorf("ws[%d].cachePath = %q, want %q", i, ws.cachePath, workspaces[0].cachePath)
+		}
+
+		// All should see the same commit.
+		head, err := ws.Repo.Head()
+		if err != nil {
+			t.Fatalf("ws[%d] Head: %v", i, err)
+		}
+		if head.Hash() != initialHash {
+			t.Errorf("ws[%d] HEAD = %s, want %s", i, head.Hash(), initialHash)
+		}
+	}
+
+	// Ref count should equal n.
+	m.mu.Lock()
+	r, ok := m.active[workspaces[0].cachePath]
+	m.mu.Unlock()
+	if !ok {
+		t.Fatal("expected active ref for cache path")
+	}
+	if r.count != n {
+		t.Errorf("ref count = %d, want %d", r.count, n)
+	}
+
+	// Release all.
+	for i := 0; i < n; i++ {
+		m.Release(workspaces[i])
+	}
+
+	// Ref count should be zero.
+	m.mu.Lock()
+	_, ok = m.active[workspaces[0].cachePath]
+	m.mu.Unlock()
+	if ok {
+		t.Error("expected ref to be cleaned up after all releases")
+	}
+}
+
+// Test that concurrent workspaces have isolated refs.
+func TestAcquire_ConcurrentIsolatedRefs(t *testing.T) {
+	sourceDir := t.TempDir()
+	barePath, _ := initBareRepo(t, sourceDir)
+
+	cacheDir := t.TempDir()
+	m := NewManager(cacheDir, false)
+	ctx := testCtx(t)
+
+	// Acquire two workspaces concurrently.
+	ws1, err := m.Acquire(ctx, barePath, nil, true)
+	if err != nil {
+		t.Fatalf("Acquire ws1: %v", err)
+	}
+	ws2, err := m.Acquire(ctx, barePath, nil, true)
+	if err != nil {
+		t.Fatalf("Acquire ws2: %v", err)
+	}
+
+	// Create a new ref in ws1 — it should not appear in ws2.
+	head, _ := ws1.Repo.Head()
+	testRef := plumbing.NewHashReference("refs/heads/test-branch", head.Hash())
+	if err := ws1.Repo.Storer.SetReference(testRef); err != nil {
+		t.Fatalf("setting ref in ws1: %v", err)
+	}
+
+	// ws2 should NOT see the test-branch.
+	_, err = ws2.Repo.Reference("refs/heads/test-branch", true)
+	if err == nil {
+		t.Error("ws2 should not see ref created in ws1 (refs should be isolated)")
+	}
+
+	m.Release(ws1)
+	m.Release(ws2)
+}
+
+// Test that objects created in a workspace are flushed to the cache on release.
+func TestRelease_FlushesObjectsToCache(t *testing.T) {
+	sourceDir := t.TempDir()
+	barePath, _ := initBareRepo(t, sourceDir)
+
+	cacheDir := t.TempDir()
+	m := NewManager(cacheDir, false)
+	ctx := testCtx(t)
+
+	// Acquire workspace and create a new object.
+	ws, err := m.Acquire(ctx, barePath, nil, true)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	// Create a new commit object in the workspace.
+	head, _ := ws.Repo.Head()
+	parentCommit, _ := ws.Repo.CommitObject(head.Hash())
+	newCommit := &object.Commit{
+		Author:       object.Signature{Name: "test", Email: "test@test.com"},
+		Committer:    object.Signature{Name: "test", Email: "test@test.com"},
+		Message:      "new commit in workspace",
+		TreeHash:     parentCommit.TreeHash,
+		ParentHashes: []plumbing.Hash{head.Hash()},
+	}
+	encoded := ws.Repo.Storer.NewEncodedObject()
+	newCommit.Encode(encoded)
+	newHash, err := ws.Repo.Storer.SetEncodedObject(encoded)
+	if err != nil {
+		t.Fatalf("storing new commit: %v", err)
+	}
+
+	cachePath := ws.cachePath
+	m.Release(ws)
+
+	// Acquire a new workspace — it should be able to see the flushed object.
+	ws2, err := m.Acquire(ctx, barePath, nil, true)
+	if err != nil {
+		t.Fatalf("second Acquire: %v", err)
+	}
+
+	// The new commit should be accessible via the cache's object store.
+	_, err = ws2.Repo.CommitObject(newHash)
+	if err != nil {
+		t.Errorf("new commit %s not found in second workspace (should have been flushed to cache %s): %v", newHash, cachePath, err)
+	}
+
+	m.Release(ws2)
+}
+
+// Test that GC cleans up stale worktree directories.
+func TestGC_CleansStaleWorktrees(t *testing.T) {
+	cacheDir := t.TempDir()
+	m := NewManager(cacheDir, false)
+	ctx := testCtx(t)
+
+	// Create a stale worktree directory (simulating a crash).
+	wtBase := filepath.Join(cacheDir, "worktrees")
+	os.MkdirAll(wtBase, 0o755)
+	staleWt := filepath.Join(wtBase, "ws-stale")
+	os.MkdirAll(staleWt, 0o755)
+
+	m.GC(ctx, map[string]bool{})
+
+	if _, err := os.Stat(staleWt); !os.IsNotExist(err) {
+		t.Error("stale worktree dir should be removed by GC")
+	}
+}
+
+// Test that GC skips the worktrees directory itself when cleaning cache dirs.
+func TestGC_SkipsWorktreesDir(t *testing.T) {
+	cacheDir := t.TempDir()
+	m := NewManager(cacheDir, false)
+	ctx := testCtx(t)
+
+	wtBase := filepath.Join(cacheDir, "worktrees")
+	os.MkdirAll(wtBase, 0o755)
+
+	m.GC(ctx, map[string]bool{})
+
+	if _, err := os.Stat(wtBase); os.IsNotExist(err) {
+		t.Error("worktrees directory should not be removed by GC")
+	}
 }

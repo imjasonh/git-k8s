@@ -9,9 +9,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5"
 	gitconfig "github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/go-git/go-git/v5/storage/filesystem"
 	"github.com/go-git/go-git/v5/storage/memory"
 	"knative.dev/pkg/logging"
 
@@ -38,17 +42,21 @@ func GetManager(ctx context.Context) *Manager {
 const DefaultGitTimeout = 5 * time.Minute
 
 // Workspace is a handle to a Git repository, backed by either disk or memory.
+// Disk-backed workspaces are isolated from each other via git alternates,
+// allowing concurrent operations on different branches of the same repo.
 type Workspace struct {
 	// Repo is the go-git Repository opened from the cache (or cloned in memory).
 	Repo *git.Repository
 	// Mode indicates whether this workspace is disk-backed or in-memory.
 	Mode string // "disk" or "memory"
 
-	path    string   // disk path (empty for in-memory)
-	manager *Manager // nil for in-memory workspaces
+	path      string   // worktree temp dir (empty for in-memory)
+	cachePath string   // cache bare repo path (empty for in-memory)
+	manager   *Manager // nil for in-memory workspaces
 }
 
-// ref tracks the in-process reference count for a cached repo path.
+// ref tracks the cache state: a mutex for serializing fetch/clone operations
+// and a count of active worktrees referencing this cache path.
 type ref struct {
 	mu    sync.Mutex
 	count int
@@ -56,10 +64,17 @@ type ref struct {
 
 // Manager manages on-disk bare Git repo caches backed by a PVC.
 // If basePath is empty, all Acquire calls fall back to in-memory clones.
+//
+// Each Acquire creates an isolated workspace directory that shares the cache's
+// object store via git alternates. This allows concurrent operations on
+// different branches of the same repo without interference.
 type Manager struct {
 	basePath string
 	mu       sync.Mutex
 	active   map[string]*ref
+
+	// worktrees tracks active worktree paths so GC can skip them.
+	worktrees map[string]bool
 
 	// shallow controls whether initial clones use depth=1.
 	// Controllers that need full history should set this to false.
@@ -72,9 +87,10 @@ type Manager struct {
 // shallow controls whether initial clones use --depth=1.
 func NewManager(basePath string, shallow bool) *Manager {
 	return &Manager{
-		basePath: basePath,
-		active:   make(map[string]*ref),
-		shallow:  shallow,
+		basePath:  basePath,
+		active:    make(map[string]*ref),
+		worktrees: make(map[string]bool),
+		shallow:   shallow,
 	}
 }
 
@@ -85,8 +101,9 @@ func (m *Manager) repoPath(repoURL string) string {
 }
 
 // Acquire returns a Workspace for the given repo URL. If caching is enabled
-// (basePath is set and cacheEnabled is true), it opens or clones a bare repo
-// on disk. Otherwise it clones into memory.
+// (basePath is set and cacheEnabled is true), it creates an isolated workspace
+// backed by a shared object cache via git alternates. Otherwise it clones
+// into memory.
 func (m *Manager) Acquire(ctx context.Context, repoURL string, auth *http.BasicAuth, cacheEnabled bool) (*Workspace, error) {
 	if m.basePath == "" || !cacheEnabled {
 		return m.acquireInMemory(ctx, repoURL, auth)
@@ -116,24 +133,49 @@ func (m *Manager) acquireInMemory(ctx context.Context, repoURL string, auth *htt
 	}, nil
 }
 
-// acquireOnDisk opens an existing bare repo on disk and fetches, or does an
-// initial clone if the cache directory doesn't exist yet.
+// acquireOnDisk updates the shared cache and creates an isolated workspace.
+// The cache lock is only held during the fetch/clone, not for the workspace
+// lifetime, so multiple workspaces for the same repo can be active concurrently.
 func (m *Manager) acquireOnDisk(ctx context.Context, repoURL string, auth *http.BasicAuth) (*Workspace, error) {
-	path := m.repoPath(repoURL)
-
-	// Per-path in-process locking.
-	r := m.getRef(path)
-	r.mu.Lock()
-
+	cachePath := m.repoPath(repoURL)
+	logger := logging.FromContext(ctx)
 	start := time.Now()
 
-	headPath := filepath.Join(path, "HEAD")
+	// Step 1: Update the shared cache (briefly locked).
+	r := m.getRef(cachePath)
+	r.mu.Lock()
+	cacheErr := m.updateCache(ctx, cachePath, repoURL, auth)
+	r.mu.Unlock()
+
+	if cacheErr != nil {
+		logger.Warnf("Cache update failed for %s, falling back to memory: %v", repoURL, cacheErr)
+		return m.acquireInMemory(ctx, repoURL, auth)
+	}
+
+	// Step 2: Track active usage for GC protection.
+	m.incRef(cachePath)
+
+	// Step 3: Create an isolated worktree from the cache.
+	ws, err := m.createWorktree(cachePath)
+	if err != nil {
+		m.decRef(cachePath)
+		logger.Warnf("Worktree creation failed for %s, falling back to memory: %v", repoURL, err)
+		return m.acquireInMemory(ctx, repoURL, auth)
+	}
+
+	metrics.WorkspaceAcquireDuration.WithLabelValues("disk").Observe(time.Since(start).Seconds())
+	return ws, nil
+}
+
+// updateCache fetches into an existing cache or performs the initial clone.
+// Caller must hold the cache lock.
+func (m *Manager) updateCache(ctx context.Context, cachePath, repoURL string, auth *http.BasicAuth) error {
+	headPath := filepath.Join(cachePath, "HEAD")
 	if _, err := os.Stat(headPath); err == nil {
-		// Cache hit: open existing bare repo and fetch.
-		repo, err := git.PlainOpen(path)
+		// Cache hit: fetch.
+		repo, err := git.PlainOpen(cachePath)
 		if err != nil {
-			r.mu.Unlock()
-			return nil, fmt.Errorf("opening cached repo at %s: %w", path, err)
+			return fmt.Errorf("opening cached repo at %s: %w", cachePath, err)
 		}
 
 		fetchCtx, cancel := context.WithTimeout(ctx, DefaultGitTimeout)
@@ -145,32 +187,19 @@ func (m *Manager) acquireOnDisk(ctx context.Context, repoURL string, auth *http.
 			RefSpecs: []gitconfig.RefSpec{"+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"},
 		})
 		if err != nil && err != git.NoErrAlreadyUpToDate {
-			// Fetch failed — fall back to in-memory for this reconcile.
-			r.mu.Unlock()
-			logger := logging.FromContext(ctx)
-			logger.Warnf("Fetch failed on cached repo %s, falling back to memory: %v", path, err)
-			return m.acquireInMemory(ctx, repoURL, auth)
+			return fmt.Errorf("fetching into cache: %w", err)
 		}
-
-		metrics.WorkspaceAcquireDuration.WithLabelValues("disk").Observe(time.Since(start).Seconds())
 		metrics.WorkspaceCacheHit.Inc()
-
-		return &Workspace{
-			Repo:    repo,
-			Mode:    "disk",
-			path:    path,
-			manager: m,
-		}, nil
+		return nil
 	}
 
 	// Cache miss: initial bare clone.
-	if err := os.MkdirAll(path, 0o755); err != nil {
-		r.mu.Unlock()
-		return nil, fmt.Errorf("creating cache dir %s: %w", path, err)
+	if err := os.MkdirAll(cachePath, 0o755); err != nil {
+		return fmt.Errorf("creating cache dir %s: %w", cachePath, err)
 	}
 
-	cloneCtx, cloneCancel := context.WithTimeout(ctx, DefaultGitTimeout)
-	defer cloneCancel()
+	cloneCtx, cancel := context.WithTimeout(ctx, DefaultGitTimeout)
+	defer cancel()
 
 	cloneOpts := &git.CloneOptions{
 		URL:  repoURL,
@@ -180,49 +209,190 @@ func (m *Manager) acquireOnDisk(ctx context.Context, repoURL string, auth *http.
 		cloneOpts.Depth = 1
 	}
 
-	repo, err := git.PlainCloneContext(cloneCtx, path, true /* isBare */, cloneOpts)
+	_, err := git.PlainCloneContext(cloneCtx, cachePath, true /* isBare */, cloneOpts)
 	if err != nil {
-		// Clean up failed clone attempt.
-		os.RemoveAll(path)
-		r.mu.Unlock()
-		// Fall back to in-memory.
-		logger := logging.FromContext(ctx)
-		logger.Warnf("Disk clone failed for %s, falling back to memory: %v", repoURL, err)
-		return m.acquireInMemory(ctx, repoURL, auth)
+		os.RemoveAll(cachePath)
+		return fmt.Errorf("cloning into cache: %w", err)
 	}
 
-	metrics.WorkspaceAcquireDuration.WithLabelValues("disk").Observe(time.Since(start).Seconds())
 	metrics.WorkspaceCacheMiss.Inc()
+	return nil
+}
+
+// createWorktree creates an isolated bare repo that shares objects with the
+// cache via git alternates. This allows concurrent operations on different
+// branches of the same repo without interference: each workspace has its own
+// refs, HEAD, and local object storage, while sharing the bulk object store.
+func (m *Manager) createWorktree(cachePath string) (*Workspace, error) {
+	wtBase := filepath.Join(m.basePath, "worktrees")
+	if err := os.MkdirAll(wtBase, 0o755); err != nil {
+		return nil, fmt.Errorf("creating worktrees dir: %w", err)
+	}
+
+	wtDir, err := os.MkdirTemp(wtBase, "ws-")
+	if err != nil {
+		return nil, fmt.Errorf("creating worktree temp dir: %w", err)
+	}
+
+	cleanup := func() { os.RemoveAll(wtDir) }
+
+	// Initialize a bare repo.
+	_, err = git.PlainInit(wtDir, true /* isBare */)
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("initializing worktree repo: %w", err)
+	}
+
+	// Set up alternates to share the cache's object store.
+	alternatesDir := filepath.Join(wtDir, "objects", "info")
+	if err := os.MkdirAll(alternatesDir, 0o755); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("creating alternates dir: %w", err)
+	}
+	cacheObjects := filepath.Join(cachePath, "objects")
+	if err := os.WriteFile(filepath.Join(alternatesDir, "alternates"), []byte(cacheObjects+"\n"), 0o644); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("writing alternates file: %w", err)
+	}
+
+	// Re-open with AlternatesFS set to the root filesystem so go-git
+	// can resolve absolute paths in the alternates file. PlainOpen uses
+	// a ChrootHelper that prevents escaping the repo root, which would
+	// block access to the cache's object store.
+	repoFS := osfs.New(wtDir)
+	storage := filesystem.NewStorageWithOptions(
+		repoFS,
+		cache.NewObjectLRUDefault(),
+		filesystem.Options{
+			AlternatesFS: osfs.New("/"),
+		},
+	)
+	repo, err := git.Open(storage, nil)
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("opening worktree with alternates: %w", err)
+	}
+
+	// Copy refs from cache.
+	cacheRepo, err := git.PlainOpen(cachePath)
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("opening cache for ref copy: %w", err)
+	}
+
+	refs, err := cacheRepo.References()
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("listing cache refs: %w", err)
+	}
+	if err := refs.ForEach(func(ref *plumbing.Reference) error {
+		return repo.Storer.SetReference(ref)
+	}); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("copying refs: %w", err)
+	}
+
+	// Copy HEAD (may be symbolic, e.g. ref: refs/heads/main).
+	headRef, err := cacheRepo.Reference(plumbing.HEAD, false)
+	if err == nil {
+		repo.Storer.SetReference(headRef)
+	}
+
+	// Copy remote config so push operations use the real remote URL.
+	cacheRemote, err := cacheRepo.Remote("origin")
+	if err == nil {
+		repo.CreateRemote(cacheRemote.Config())
+	}
+
+	// Track this worktree path so GC skips it.
+	m.mu.Lock()
+	m.worktrees[wtDir] = true
+	m.mu.Unlock()
 
 	return &Workspace{
-		Repo:    repo,
-		Mode:    "disk",
-		path:    path,
-		manager: m,
+		Repo:      repo,
+		Mode:      "disk",
+		path:      wtDir,
+		cachePath: cachePath,
+		manager:   m,
 	}, nil
 }
 
-// Release releases a workspace. For disk-backed workspaces this releases
-// the in-process lock. For in-memory workspaces this is a no-op.
+// Release releases a workspace. For disk-backed workspaces this flushes any
+// new objects back to the cache (so other workspaces can find them) and
+// removes the isolated worktree directory. For in-memory workspaces this
+// is a no-op.
 func (m *Manager) Release(ws *Workspace) {
 	if ws == nil || ws.manager == nil {
 		return
 	}
-	m.mu.Lock()
-	r, ok := m.active[ws.path]
-	if !ok {
+
+	if ws.path != "" {
+		// Flush new objects from the worktree to the cache so that
+		// subsequently created workspaces (e.g. push controller) can
+		// access objects created during this workspace's lifetime
+		// (e.g. merge commits from the resolver).
+		if ws.cachePath != "" {
+			m.flushObjects(ws.path, ws.cachePath)
+		}
+
+		// Untrack this worktree.
+		m.mu.Lock()
+		delete(m.worktrees, ws.path)
 		m.mu.Unlock()
-		return
+
+		os.RemoveAll(ws.path)
 	}
-	r.count--
-	if r.count == 0 {
-		delete(m.active, ws.path)
+
+	if ws.cachePath != "" {
+		m.decRef(ws.cachePath)
 	}
-	m.mu.Unlock()
-	r.mu.Unlock()
 }
 
-// getRef returns (or creates) a ref for the given path, incrementing the refcount.
+// flushObjects copies loose objects from the worktree's object store back to
+// the cache. This is necessary because objects created in the worktree (e.g.
+// merge commits) are stored locally in the worktree, not in the cache. Other
+// workspaces that share the cache via alternates won't see them unless they
+// are copied back. Since objects are content-addressed, this is idempotent.
+func (m *Manager) flushObjects(wtPath, cachePath string) {
+	wtObjects := filepath.Join(wtPath, "objects")
+	cacheObjects := filepath.Join(cachePath, "objects")
+
+	entries, err := os.ReadDir(wtObjects)
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == "info" || entry.Name() == "pack" {
+			continue
+		}
+		// Two-character hex directories contain loose objects.
+		srcDir := filepath.Join(wtObjects, entry.Name())
+		dstDir := filepath.Join(cacheObjects, entry.Name())
+		os.MkdirAll(dstDir, 0o755)
+
+		objects, err := os.ReadDir(srcDir)
+		if err != nil {
+			continue
+		}
+		for _, obj := range objects {
+			src := filepath.Join(srcDir, obj.Name())
+			dst := filepath.Join(dstDir, obj.Name())
+			if _, err := os.Stat(dst); err == nil {
+				continue // already exists in cache
+			}
+			data, err := os.ReadFile(src)
+			if err != nil {
+				continue
+			}
+			os.WriteFile(dst, data, 0o444)
+		}
+	}
+}
+
+// getRef returns the ref for the given cache path, creating one if needed.
+// Does NOT increment the worktree count.
 func (m *Manager) getRef(path string) *ref {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -231,19 +401,67 @@ func (m *Manager) getRef(path string) *ref {
 		r = &ref{}
 		m.active[path] = r
 	}
-	r.count++
 	return r
+}
+
+// incRef increments the active worktree count for a cache path.
+func (m *Manager) incRef(path string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.active[path]
+	if !ok {
+		r = &ref{}
+		m.active[path] = r
+	}
+	r.count++
+}
+
+// decRef decrements the active worktree count, removing the entry when zero.
+func (m *Manager) decRef(path string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.active[path]
+	if !ok {
+		return
+	}
+	r.count--
+	if r.count <= 0 {
+		delete(m.active, path)
+	}
 }
 
 // GC removes cached directories that are not in the activeRepos set.
 // It skips paths that have active in-process references to avoid racing
-// with ongoing reconciles.
+// with ongoing reconciles. It also cleans up stale worktree directories
+// left behind by crashes.
 func (m *Manager) GC(ctx context.Context, activeRepos map[string]bool) {
 	if m.basePath == "" {
 		return
 	}
 
 	logger := logging.FromContext(ctx)
+
+	// Clean up stale worktree directories (from crashes).
+	wtBase := filepath.Join(m.basePath, "worktrees")
+	if entries, err := os.ReadDir(wtBase); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			dirPath := filepath.Join(wtBase, entry.Name())
+			// Skip worktrees that are still active.
+			m.mu.Lock()
+			active := m.worktrees[dirPath]
+			m.mu.Unlock()
+			if active {
+				continue
+			}
+			logger.Infof("GC: removing stale worktree %s", dirPath)
+			os.RemoveAll(dirPath)
+		}
+	}
+
+	// Clean up stale cache directories.
 	entries, err := os.ReadDir(m.basePath)
 	if err != nil {
 		logger.Warnf("GC: reading cache dir: %v", err)
@@ -251,7 +469,7 @@ func (m *Manager) GC(ctx context.Context, activeRepos map[string]bool) {
 	}
 
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() || entry.Name() == "worktrees" {
 			continue
 		}
 		dirPath := filepath.Join(m.basePath, entry.Name())
@@ -275,16 +493,28 @@ func (m *Manager) GC(ctx context.Context, activeRepos map[string]bool) {
 }
 
 // Deepen fetches full history for a cached repo that was initially shallow-cloned.
-// This is a no-op for in-memory workspaces or already-full clones.
+// The fetch targets the shared cache repo; the workspace sees the new objects
+// automatically via alternates. This is a no-op for in-memory workspaces or
+// workspaces without a cache path.
 func (m *Manager) Deepen(ctx context.Context, ws *Workspace, auth *http.BasicAuth) error {
-	if ws.Mode != "disk" {
+	if ws.Mode != "disk" || ws.cachePath == "" {
 		return nil
+	}
+
+	// Lock the cache briefly for the fetch.
+	r := m.getRef(ws.cachePath)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	cacheRepo, err := git.PlainOpen(ws.cachePath)
+	if err != nil {
+		return fmt.Errorf("opening cache for deepen: %w", err)
 	}
 
 	fetchCtx, cancel := context.WithTimeout(ctx, DefaultGitTimeout)
 	defer cancel()
 
-	err := ws.Repo.FetchContext(fetchCtx, &git.FetchOptions{
+	err = cacheRepo.FetchContext(fetchCtx, &git.FetchOptions{
 		Auth:     auth,
 		Force:    true,
 		Depth:    0, // unshallow
